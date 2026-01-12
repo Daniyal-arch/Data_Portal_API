@@ -1,0 +1,46 @@
+# EODAG Configuration Example
+# Copy this file to ~/.config/eodag/eodag.yml and configure your credentials
+
+# Copernicus Data Space (recommended - free registration)
+cop_dataspace:
+  priority: 1
+  search:
+    timeout: 30
+  download:
+    timeout: 300
+  credentials:
+    username: your_username_here
+    password: your_password_here
+  # Register at: https://dataspace.copernicus.eu/
+
+# USGS EarthExplorer (for Landsat)
+usgs:
+  priority: 2
+  search:
+    timeout: 30
+  download:
+    timeout: 600
+  credentials:
+    username: your_username_here
+    password: your_password_here
+  # Register at: https://ers.cr.usgs.gov/register
+
+# AWS S3 (public data - no credentials needed)
+aws_eos:
+  priority: 3
+  search:
+    timeout: 30
+  download:
+    timeout: 300
+
+# Planetary Computer (Microsoft - no credentials for public data)
+planetary_computer:
+  priority: 4
+  search:
+    timeout: 30
+
+# Notes:
+# 1. Priority determines which provider is tried first (lower number = higher priority)
+# 2. Not all products are available from all providers
+# 3. Some providers require registration and authentication
+# 4. For more providers and options, see: https://eodag.readthedocs.io/
