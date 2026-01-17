@@ -90,19 +90,30 @@ class SearchResult:
         Returns:
             Dictionary representation suitable for JSON serialization
         """
+        # Handle geometry - convert Shapely objects to GeoJSON dict
+        geometry = self.geometry
+        if geometry is not None and not isinstance(geometry, dict):
+            # Shapely geometry object
+            if hasattr(geometry, '__geo_interface__'):
+                geometry = dict(geometry.__geo_interface__)
+            elif hasattr(geometry, 'mapping'):
+                from shapely.geometry import mapping
+                geometry = mapping(geometry)
+            else:
+                geometry = None
+
         return {
             "id": self.id,
             "title": self.title,
             "provider": self.provider,
             "product_type": self.product_type,
             "data_type": self.data_type.value if isinstance(self.data_type, DataType) else self.data_type,
-            "geometry": self.geometry,
-            "bbox": self.bbox,
+            "geometry": geometry,
+            "bbox": list(self.bbox) if self.bbox else None,
             "datetime": self.datetime,
             "cloud_cover": self.cloud_cover,
             "thumbnail_url": self.thumbnail_url,
-            "size_mb": self.size_mb,
-            "metadata": self.metadata
+            "size_mb": self.size_mb
         }
 
     @property

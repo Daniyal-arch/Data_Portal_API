@@ -47,6 +47,9 @@ app.add_middleware(
 hub = GeoDataHub()
 parser = NLParser()
 
+# Store search results for download reference
+_last_search_results: Dict[str, Any] = {}
+
 
 # Pydantic models for request/response
 
@@ -238,6 +241,10 @@ def search_natural_language(
         # Execute search
         results = hub.search(data_request)
 
+        # Cache results for download
+        for r in results:
+            _last_search_results[r.id] = r
+
         # Format response
         return {
             "query": q,
@@ -251,7 +258,8 @@ def search_natural_language(
                 "cloud_cover_max": data_request.cloud_cover_max
             },
             "count": len(results),
-            "results": [r.to_dict() for r in results]
+            "results": [r.to_dict() for r in results],
+            "download_hint": "Use POST /download with product_id to download any result"
         }
 
     except Exception as e:
@@ -341,6 +349,144 @@ def list_data_types():
     return {
         "data_types": [dt.value for dt in DataType]
     }
+
+
+# Download functionality
+
+class DownloadRequest(BaseModel):
+    """Download request model"""
+    product_id: str = Field(..., description="Product ID from search results")
+    output_dir: Optional[str] = Field(None, description="Output directory (default: ./downloads)")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "product_id": "S2A_MSIL2A_20240115T103321_N0510_R108_T31UDQ_20240115T144655",
+                "output_dir": "f:/Automating_data_portal/downloads"
+            }
+        }
+
+
+class DownloadResponse(BaseModel):
+    """Download response model"""
+    status: str
+    product_id: str
+    message: str
+    file_path: Optional[str] = None
+
+
+@app.post("/download", response_model=DownloadResponse, tags=["Download"])
+def download_product(request: DownloadRequest, background_tasks: BackgroundTasks):
+    """
+    Download a satellite product by ID.
+
+    First search for products, then use the product ID from results to download.
+    Downloads run in the background.
+
+    Example:
+        ```json
+        {
+            "product_id": "S2A_MSIL2A_20240115...",
+            "output_dir": "f:/Automating_data_portal/downloads"
+        }
+        ```
+    """
+    try:
+        # Check if product is in cache
+        if request.product_id not in _last_search_results:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Product {request.product_id} not found in recent search results. Please search first."
+            )
+
+        result = _last_search_results[request.product_id]
+        output_dir = request.output_dir or "f:/Automating_data_portal/downloads"
+
+        # Download synchronously (for small files) or use background for large
+        try:
+            file_path = hub.download(result, output_dir)
+            return DownloadResponse(
+                status="completed",
+                product_id=request.product_id,
+                message="Download completed successfully",
+                file_path=str(file_path)
+            )
+        except Exception as e:
+            return DownloadResponse(
+                status="failed",
+                product_id=request.product_id,
+                message=f"Download failed: {str(e)}",
+                file_path=None
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+
+
+@app.post("/search-and-download", tags=["Download"])
+def search_and_download(
+    query: str = Query(..., description="Natural language search query"),
+    output_dir: Optional[str] = Query(None, description="Output directory"),
+    limit: int = Query(1, description="Number of products to download", ge=1, le=5)
+):
+    """
+    Search and download in one step.
+
+    Searches for products and downloads the top results.
+
+    Example:
+        POST /search-and-download?query=Sentinel-2 Monaco January 2024&limit=1
+    """
+    try:
+        # Parse and search
+        data_request = parser.parse(query)
+        data_request.limit = limit
+        results = hub.search(data_request)
+
+        if not results:
+            return {
+                "status": "no_results",
+                "query": query,
+                "message": "No products found matching your query"
+            }
+
+        # Cache results
+        for r in results:
+            _last_search_results[r.id] = r
+
+        output_dir = output_dir or "f:/Automating_data_portal/downloads"
+        downloaded = []
+        failed = []
+
+        for result in results:
+            try:
+                file_path = hub.download(result, output_dir)
+                downloaded.append({
+                    "product_id": result.id,
+                    "file_path": str(file_path),
+                    "cloud_cover": result.cloud_cover,
+                    "datetime": result.datetime
+                })
+            except Exception as e:
+                failed.append({
+                    "product_id": result.id,
+                    "error": str(e)
+                })
+
+        return {
+            "status": "completed",
+            "query": query,
+            "searched": len(results),
+            "downloaded": len(downloaded),
+            "failed": len(failed),
+            "results": downloaded,
+            "errors": failed if failed else None
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search and download failed: {str(e)}")
 
 
 # Error handlers
