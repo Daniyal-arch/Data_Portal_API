@@ -177,6 +177,6 @@ If you use GeoDataHub in your research, please cite:
   title = {GeoDataHub: Unified Geospatial Data Access},
   author = {GeoDataHub Team},
   year = {2024},
-  url = {https://github.com/yourusername/geodatahub}
+  url = {https://github.com/Daniyal-arch/geodatahub}
 }
 ```
