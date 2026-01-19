@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Background circle -->
+  <circle cx="32" cy="32" r="30" fill="#2E86AB"/>
+
+  <!-- Satellite dish -->
+  <path d="M20 40 Q32 20 44 40" stroke="#FFFFFF" stroke-width="3" fill="none"/>
+  <circle cx="32" cy="28" r="4" fill="#FFFFFF"/>
+
+  <!-- Signal waves -->
+  <path d="M26 44 Q32 38 38 44" stroke="#A4D4AE" stroke-width="2" fill="none"/>
+  <path d="M22 48 Q32 40 42 48" stroke="#A4D4AE" stroke-width="2" fill="none"/>
+
+  <!-- Download arrow -->
+  <path d="M32 36 L32 52 M26 46 L32 52 L38 46" stroke="#FFFFFF" stroke-width="2" fill="none"/>
+</svg>

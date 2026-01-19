@@ -1,0 +1,34 @@
+[general]
+name=GeoDataHub
+qgisMinimumVersion=3.22
+description=AI-powered satellite data search and download with natural language queries and smart dataset recommendations
+version=0.1.0
+author=Daniyal Khan
+email=daniyalnahk@gmail.com
+
+about=GeoDataHub is a QGIS plugin that enables:
+    - Natural language search for satellite imagery (e.g., "Sentinel-2 images of Paris from last month")
+    - AI-powered dataset recommendations based on your analysis needs
+    - Direct download and loading of satellite data as QGIS layers
+    - Support for Copernicus, USGS, AWS, and Planetary Computer data sources
+    - Integration with map canvas extent for spatial filtering
+
+tracker=https://github.com/yourusername/geodatahub/issues
+repository=https://github.com/yourusername/geodatahub
+
+changelog=
+    0.1.0 - Initial release
+        - Natural language search
+        - AI dataset recommendations
+        - Download and layer loading
+
+tags=remote sensing, satellite, sentinel, landsat, download, ai, copernicus
+
+homepage=https://github.com/yourusername/geodatahub
+category=Raster
+icon=icons/icon.png
+
+experimental=True
+deprecated=False
+
+hasProcessingProvider=no
