@@ -18,6 +18,10 @@ try:
     from geodatahub import GeoDataHub, NLParser, DataRequest
     from geodatahub.models.request import DataType, OutputFormat
     from geodatahub.models.result import SearchResult
+    from geodatahub.data_sources import (
+        DATA_SOURCES, DataCategory,
+        get_sources_for_analysis, get_sources_by_category, get_sources_by_keyword
+    )
 except ImportError:
     raise ImportError(
         "geodatahub package not found. Please install it first:\n"
@@ -118,7 +122,11 @@ def root():
             "search": "/search",
             "search_nl": "/search/nl",
             "products": "/products",
-            "providers": "/providers"
+            "providers": "/providers",
+            "download": "/download",
+            "datasources": "/datasources",
+            "datasources_recommend": "/datasources/recommend",
+            "datasources_categories": "/datasources/categories/list"
         }
     }
 
@@ -487,6 +495,224 @@ def search_and_download(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Search and download failed: {str(e)}")
+
+
+# Data Sources Catalog Endpoints
+
+class DataSourceResponse(BaseModel):
+    """Data source information model"""
+    id: str
+    name: str
+    description: str
+    provider: str
+    category: str
+    resolution_m: Optional[float]
+    revisit_days: Optional[int]
+    bands: List[str]
+    use_cases: List[str]
+    suitable_indices: List[str]
+    keywords: List[str]
+    pros: List[str]
+    cons: List[str]
+
+
+class RecommendationRequest(BaseModel):
+    """AI recommendation request"""
+    analysis_description: str = Field(..., description="Description of the analysis you want to perform")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "analysis_description": "I want to monitor crop health and detect drought stress in agricultural fields"
+            }
+        }
+
+
+@app.get("/datasources", tags=["Data Sources"])
+def list_data_sources(
+    category: Optional[str] = Query(None, description="Filter by category (optical, sar, dem, climate, etc.)"),
+    keyword: Optional[str] = Query(None, description="Filter by keyword")
+):
+    """
+    List all available data sources in the catalog.
+
+    Optionally filter by category or keyword.
+
+    Categories: optical, sar, dem, land_cover, climate, ocean, atmosphere, vegetation, nighttime
+
+    Example:
+        GET /datasources
+        GET /datasources?category=optical
+        GET /datasources?keyword=agriculture
+    """
+    try:
+        if category:
+            try:
+                cat = DataCategory(category.lower())
+                sources = get_sources_by_category(cat)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid category '{category}'. Valid categories: {[c.value for c in DataCategory]}"
+                )
+        elif keyword:
+            sources = get_sources_by_keyword(keyword)
+        else:
+            sources = list(DATA_SOURCES.values())
+
+        return {
+            "count": len(sources),
+            "filter": {"category": category, "keyword": keyword},
+            "datasources": [
+                {
+                    "id": s.id,
+                    "name": s.name,
+                    "description": s.description,
+                    "provider": s.provider,
+                    "category": s.category.value,
+                    "resolution_m": s.resolution_m,
+                    "revisit_days": s.revisit_days,
+                    "bands": s.bands,
+                    "use_cases": s.use_cases,
+                    "suitable_indices": s.suitable_indices,
+                    "keywords": s.keywords,
+                    "pros": s.pros,
+                    "cons": s.cons
+                }
+                for s in sources
+            ]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list data sources: {str(e)}")
+
+
+@app.get("/datasources/{source_id}", tags=["Data Sources"])
+def get_data_source(source_id: str):
+    """
+    Get detailed information about a specific data source.
+
+    Example:
+        GET /datasources/S2_MSI_L2A
+    """
+    if source_id not in DATA_SOURCES:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Data source '{source_id}' not found. Use GET /datasources to see available sources."
+        )
+
+    source = DATA_SOURCES[source_id]
+    return {
+        "id": source.id,
+        "name": source.name,
+        "description": source.description,
+        "provider": source.provider,
+        "category": source.category.value,
+        "resolution_m": source.resolution_m,
+        "revisit_days": source.revisit_days,
+        "bands": source.bands,
+        "use_cases": source.use_cases,
+        "suitable_indices": source.suitable_indices,
+        "keywords": source.keywords,
+        "pros": source.pros,
+        "cons": source.cons
+    }
+
+
+@app.get("/datasources/categories/list", tags=["Data Sources"])
+def list_categories():
+    """
+    List all available data source categories.
+
+    Example:
+        GET /datasources/categories/list
+    """
+    return {
+        "categories": [
+            {"id": c.value, "name": c.value.replace("_", " ").title()}
+            for c in DataCategory
+        ]
+    }
+
+
+@app.post("/datasources/recommend", tags=["Data Sources"])
+def recommend_data_sources(request: RecommendationRequest):
+    """
+    Get AI-powered data source recommendations based on your analysis description.
+
+    Describe what you want to analyze and get intelligent suggestions for:
+    - Best datasets for your use case
+    - Relevant spectral indices
+    - Processing tips
+
+    Example:
+        ```json
+        {
+            "analysis_description": "I want to monitor crop health and detect drought stress"
+        }
+        ```
+    """
+    try:
+        analysis = request.analysis_description.lower()
+
+        # Get matching sources from catalog
+        matching_sources = get_sources_for_analysis(analysis)
+
+        if not matching_sources:
+            # Fallback to keyword search
+            keywords = analysis.split()
+            for word in keywords:
+                if len(word) > 3:
+                    matching_sources.extend(get_sources_by_keyword(word))
+            matching_sources = list({s.id: s for s in matching_sources}.values())
+
+        # Build recommendations with reasoning
+        recommendations = []
+        for source in matching_sources[:5]:  # Top 5 recommendations
+            match_reasons = []
+            for use_case in source.use_cases:
+                if any(keyword in analysis for keyword in use_case.lower().split()):
+                    match_reasons.append(use_case)
+
+            recommendations.append({
+                "id": source.id,
+                "name": source.name,
+                "description": source.description,
+                "category": source.category.value,
+                "resolution_m": source.resolution_m,
+                "why_recommended": match_reasons[:3] if match_reasons else source.use_cases[:2],
+                "suggested_indices": source.suitable_indices[:4],
+                "pros": source.pros[:3],
+                "cons": source.cons[:2],
+                "provider": source.provider
+            })
+
+        # Add workflow suggestions based on analysis type
+        workflow_tips = []
+        if any(word in analysis for word in ['vegetation', 'crop', 'agriculture', 'plant', 'forest']):
+            workflow_tips.append("Use NDVI for vegetation health assessment")
+            workflow_tips.append("Consider time series analysis for phenology monitoring")
+        if any(word in analysis for word in ['water', 'flood', 'lake', 'river', 'moisture']):
+            workflow_tips.append("Use NDWI or MNDWI for water body detection")
+            workflow_tips.append("Consider SAR data for all-weather monitoring")
+        if any(word in analysis for word in ['urban', 'city', 'building', 'settlement']):
+            workflow_tips.append("Use NDBI for built-up area mapping")
+            workflow_tips.append("Consider nighttime lights for urbanization analysis")
+        if any(word in analysis for word in ['fire', 'burn', 'thermal']):
+            workflow_tips.append("Use NBR for burn severity assessment")
+            workflow_tips.append("Consider MODIS or VIIRS for active fire detection")
+
+        return {
+            "analysis": request.analysis_description,
+            "recommendation_count": len(recommendations),
+            "recommendations": recommendations,
+            "workflow_tips": workflow_tips if workflow_tips else ["Explore the recommended datasets based on your specific use case"],
+            "note": "Use GET /datasources/{id} for full details on any dataset"
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Recommendation failed: {str(e)}")
 
 
 # Error handlers
