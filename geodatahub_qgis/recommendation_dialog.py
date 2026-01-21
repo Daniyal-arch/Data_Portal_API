@@ -2,7 +2,7 @@
 AI Dataset Recommendation Dialog
 
 Provides intelligent dataset recommendations based on the user's analysis needs.
-Uses comprehensive data source catalog for diverse recommendations.
+Uses comprehensive workflow templates and EODAG catalog for diverse recommendations.
 """
 
 import os
@@ -15,18 +15,38 @@ from qgis.PyQt.QtWidgets import (
     QPushButton, QGroupBox, QListWidget, QListWidgetItem,
     QProgressBar, QMessageBox, QComboBox, QCheckBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QTabWidget, QWidget, QScrollArea, QFrame
+    QTabWidget, QWidget, QScrollArea, QFrame, QSplitter
 )
 from qgis.PyQt.QtGui import QFont, QColor
 
 
-# Import data sources catalog
+# Import geodatahub modules
 import sys
 plugin_dir = os.path.dirname(__file__)
 parent_dir = os.path.dirname(plugin_dir)
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
+# Try importing new modules
+try:
+    from geodatahub.workflows import (
+        ANALYSIS_WORKFLOWS, SPECTRAL_INDICES, AnalysisCategory,
+        match_workflow, get_workflow_recommendation, get_qgis_formula
+    )
+    from geodatahub.eodag_catalog import (
+        EODAG_PROVIDERS, EODAG_PRODUCTS,
+        get_providers_for_product, search_products as search_eodag_products
+    )
+    from geodatahub.provider_config import (
+        get_config_manager, check_product_access
+    )
+    WORKFLOWS_AVAILABLE = True
+except ImportError:
+    WORKFLOWS_AVAILABLE = False
+    ANALYSIS_WORKFLOWS = {}
+    SPECTRAL_INDICES = {}
+
+# Fallback to data_sources if workflows not available
 try:
     from geodatahub.data_sources import (
         DATA_SOURCES, DataSource, DataCategory,
@@ -37,29 +57,6 @@ try:
 except ImportError:
     DATA_SOURCES_AVAILABLE = False
     DATA_SOURCES = {}
-
-
-# LLM prompt for advanced recommendations
-RECOMMENDATION_PROMPT = """You are a remote sensing and GIS expert. Based on the user's analysis description, recommend the most suitable satellite datasets.
-
-User's analysis: {analysis_description}
-Location: {location}
-
-Available datasets:
-{available_datasets}
-
-Respond in JSON format:
-{{
-    "recommended_datasets": ["dataset_id1", "dataset_id2"],
-    "primary_recommendation": "dataset_id",
-    "reasoning": "explanation of why these datasets are suitable",
-    "suggested_indices": ["INDEX1", "INDEX2"],
-    "processing_workflow": ["step1", "step2", "step3"],
-    "cloud_cover_advice": "advice on cloud cover threshold",
-    "temporal_advice": "advice on time period selection",
-    "alternative_approach": "alternative methodology if primary doesn't work"
-}}
-"""
 
 
 class RecommendationWorker(QThread):
@@ -76,7 +73,9 @@ class RecommendationWorker(QThread):
 
     def run(self):
         try:
-            if self.use_llm:
+            if WORKFLOWS_AVAILABLE:
+                result = self.get_workflow_recommendation()
+            elif self.use_llm:
                 result = self.get_llm_recommendation()
             else:
                 result = self.get_catalog_recommendation()
@@ -85,6 +84,82 @@ class RecommendationWorker(QThread):
 
         except Exception as e:
             self.error.emit(str(e))
+
+    def get_workflow_recommendation(self):
+        """Get recommendation using workflow templates."""
+        recommendation = get_workflow_recommendation(self.analysis_text)
+
+        if recommendation.get("status") == "no_match":
+            return self.get_catalog_recommendation()
+
+        workflow = recommendation.get("recommended_workflow", {})
+
+        # Check provider access
+        primary_dataset = workflow.get("primary_dataset", "S2_MSI_L2A")
+        provider_check = check_product_access(primary_dataset)
+
+        # Build result
+        result = {
+            "workflow_id": workflow.get("id"),
+            "workflow_name": workflow.get("name"),
+            "recommended_datasets": [primary_dataset] + workflow.get("fallback_datasets", []),
+            "primary_recommendation": primary_dataset,
+            "reasoning": workflow.get("description", ""),
+            "suggested_indices": workflow.get("indices", []),
+            "processing_workflow": [
+                f"{s['order']}. {s['name']}: {s['description']}"
+                for s in workflow.get("steps", [])
+            ],
+            "qgis_steps": workflow.get("steps", []),
+            "cloud_cover_max": workflow.get("cloud_cover_max", 20),
+            "temporal_requirement": workflow.get("temporal_requirement", "single"),
+            "indices_details": recommendation.get("indices_details", []),
+            "provider_status": provider_check,
+            "alternative_workflows": recommendation.get("alternative_workflows", []),
+            "dataset_details": []
+        }
+
+        # Add dataset details from EODAG catalog
+        for ds_id in result["recommended_datasets"]:
+            if ds_id in EODAG_PRODUCTS:
+                product = EODAG_PRODUCTS[ds_id]
+                result["dataset_details"].append({
+                    "id": product.id,
+                    "name": product.title,
+                    "category": product.sensor_type,
+                    "resolution_m": product.resolution_m,
+                    "provider": ", ".join(product.providers[:2]),
+                    "description": product.description,
+                    "platform": product.platform
+                })
+            elif DATA_SOURCES_AVAILABLE and ds_id in DATA_SOURCES:
+                ds = DATA_SOURCES[ds_id]
+                result["dataset_details"].append({
+                    "id": ds.id,
+                    "name": ds.name,
+                    "category": ds.category.value,
+                    "resolution_m": ds.resolution_m,
+                    "provider": ds.provider,
+                    "description": ds.description,
+                    "pros": ds.pros,
+                    "cons": ds.cons
+                })
+
+        # Add advice based on workflow
+        if workflow.get("category") == "flood" or "sar" in str(workflow).lower():
+            result["cloud_cover_advice"] = "SAR works through clouds - no cloud cover filter needed."
+        else:
+            result["cloud_cover_advice"] = f"Use <{result['cloud_cover_max']}% cloud cover for optical analysis."
+
+        temporal = result["temporal_requirement"]
+        if temporal == "before_after":
+            result["temporal_advice"] = "You need imagery from before AND after the event for change detection."
+        elif temporal == "multi-date":
+            result["temporal_advice"] = "Multiple dates recommended for time series analysis."
+        else:
+            result["temporal_advice"] = "Single date imagery is sufficient for this analysis."
+
+        return result
 
     def get_llm_recommendation(self):
         """Get recommendation using LLM."""
@@ -95,17 +170,8 @@ class RecommendationWorker(QThread):
             if not client:
                 return self.get_catalog_recommendation()
 
-            # Build available datasets string
-            datasets_str = ""
-            for ds_id, ds in DATA_SOURCES.items():
-                datasets_str += f"- {ds_id}: {ds.name} ({ds.category.value}, {ds.resolution_m}m) - {ds.description[:100]}...\n"
-
-            prompt = RECOMMENDATION_PROMPT.format(
-                analysis_description=self.analysis_text,
-                location=self.location or "Not specified",
-                available_datasets=datasets_str
-            )
-
+            # Build prompt with workflow context
+            prompt = self._build_llm_prompt()
             response = client.complete(prompt)
 
             # Parse JSON from response
@@ -114,27 +180,7 @@ class RecommendationWorker(QThread):
                 end = response.rfind('}') + 1
                 if start >= 0 and end > start:
                     json_str = response[start:end]
-                    result = json.loads(json_str)
-
-                    # Enrich with data source details
-                    result["dataset_details"] = []
-                    for ds_id in result.get("recommended_datasets", []):
-                        if ds_id in DATA_SOURCES:
-                            ds = DATA_SOURCES[ds_id]
-                            result["dataset_details"].append({
-                                "id": ds.id,
-                                "name": ds.name,
-                                "category": ds.category.value,
-                                "resolution_m": ds.resolution_m,
-                                "provider": ds.provider,
-                                "pros": ds.pros,
-                                "cons": ds.cons,
-                                "use_cases": ds.use_cases,
-                                "suitable_indices": ds.suitable_indices
-                            })
-
-                    return result
-
+                    return json.loads(json_str)
             except json.JSONDecodeError:
                 pass
 
@@ -143,18 +189,32 @@ class RecommendationWorker(QThread):
         except Exception:
             return self.get_catalog_recommendation()
 
+    def _build_llm_prompt(self):
+        """Build LLM prompt with workflow context."""
+        workflows_str = ""
+        for wf_id, wf in ANALYSIS_WORKFLOWS.items():
+            workflows_str += f"- {wf.name}: {wf.description} (Dataset: {wf.primary_dataset})\n"
+
+        return f"""You are a remote sensing expert. Recommend datasets for this analysis:
+
+User's analysis: {self.analysis_text}
+Location: {self.location or "Not specified"}
+
+Available workflows:
+{workflows_str}
+
+Respond in JSON format with recommended_datasets, reasoning, suggested_indices, processing_workflow."""
+
     def get_catalog_recommendation(self):
         """Get recommendation from data sources catalog."""
         if not DATA_SOURCES_AVAILABLE:
             return self._fallback_recommendation()
 
-        # Use catalog-based recommendation
         recommended_sources = get_sources_for_analysis(self.analysis_text)
 
         if not recommended_sources:
             recommended_sources = [DATA_SOURCES.get("S2_MSI_L2A")]
 
-        # Build result
         result = {
             "recommended_datasets": [ds.id for ds in recommended_sources if ds],
             "primary_recommendation": recommended_sources[0].id if recommended_sources else "S2_MSI_L2A",
@@ -164,17 +224,10 @@ class RecommendationWorker(QThread):
             "dataset_details": []
         }
 
-        # Compile info from recommended sources
         all_indices = set()
-        all_use_cases = []
-        pros_list = []
-
         for ds in recommended_sources:
             if ds:
                 all_indices.update(ds.suitable_indices)
-                all_use_cases.extend(ds.use_cases[:2])
-                pros_list.extend(ds.pros[:2])
-
                 result["dataset_details"].append({
                     "id": ds.id,
                     "name": ds.name,
@@ -183,41 +236,16 @@ class RecommendationWorker(QThread):
                     "provider": ds.provider,
                     "description": ds.description,
                     "pros": ds.pros,
-                    "cons": ds.cons,
-                    "use_cases": ds.use_cases,
-                    "suitable_indices": ds.suitable_indices
+                    "cons": ds.cons
                 })
 
         result["suggested_indices"] = list(all_indices)[:6]
-        result["reasoning"] = f"Based on your analysis requirements, these datasets are recommended. " \
-                             f"Key advantages: {', '.join(pros_list[:4])}"
-
-        # Add workflow suggestions
-        result["processing_workflow"] = [
-            "1. Download data for your area of interest",
-            "2. Apply atmospheric correction (if needed)",
-            f"3. Calculate indices: {', '.join(list(all_indices)[:3])}",
-            "4. Perform classification or analysis",
-            "5. Validate results"
-        ]
-
-        # Add advice
-        primary = DATA_SOURCES.get(result["primary_recommendation"])
-        if primary:
-            if primary.category == DataCategory.OPTICAL:
-                result["cloud_cover_advice"] = "Use <20% cloud cover for optical analysis. Consider compositing multiple dates."
-            elif primary.category == DataCategory.SAR:
-                result["cloud_cover_advice"] = "SAR works through clouds - no cloud cover filter needed."
-            else:
-                result["cloud_cover_advice"] = "N/A for this data type."
-
-            result["temporal_advice"] = f"Data available from {primary.start_date or 'varies'}. " \
-                                       f"Revisit time: {primary.revisit_days or 'N/A'} days."
+        result["reasoning"] = "Based on keyword matching with your analysis requirements."
 
         return result
 
     def _fallback_recommendation(self):
-        """Fallback when data sources not available."""
+        """Fallback when no modules available."""
         return {
             "recommended_datasets": ["S2_MSI_L2A"],
             "primary_recommendation": "S2_MSI_L2A",
@@ -228,7 +256,7 @@ class RecommendationWorker(QThread):
 
 
 class RecommendationDialog(QDialog):
-    """Dialog for AI-powered dataset recommendations."""
+    """Dialog for AI-powered dataset recommendations with QGIS workflow integration."""
 
     def __init__(self, parent=None, plugin=None):
         super().__init__(parent)
@@ -239,8 +267,8 @@ class RecommendationDialog(QDialog):
 
     def setup_ui(self):
         """Set up the dialog UI."""
-        self.setWindowTitle("AI Dataset Recommendations")
-        self.setMinimumSize(900, 700)
+        self.setWindowTitle("AI Dataset Recommendations & Workflows")
+        self.setMinimumSize(1000, 800)
 
         layout = QVBoxLayout(self)
 
@@ -252,9 +280,17 @@ class RecommendationDialog(QDialog):
         recommend_tab = self.create_recommend_tab()
         tabs.addTab(recommend_tab, "AI Recommendations")
 
-        # Tab 2: Browse All Datasets
+        # Tab 2: Browse Workflows
+        workflows_tab = self.create_workflows_tab()
+        tabs.addTab(workflows_tab, "Analysis Workflows")
+
+        # Tab 3: Browse Datasets
         browse_tab = self.create_browse_tab()
-        tabs.addTab(browse_tab, "Browse All Datasets")
+        tabs.addTab(browse_tab, "Browse Datasets")
+
+        # Tab 4: Provider Status
+        provider_tab = self.create_provider_tab()
+        tabs.addTab(provider_tab, "Provider Status")
 
         # Action buttons
         button_layout = QHBoxLayout()
@@ -263,6 +299,11 @@ class RecommendationDialog(QDialog):
         self.search_btn.clicked.connect(self.search_recommended)
         self.search_btn.setEnabled(False)
         button_layout.addWidget(self.search_btn)
+
+        self.run_workflow_btn = QPushButton("Run Workflow in QGIS")
+        self.run_workflow_btn.clicked.connect(self.run_workflow)
+        self.run_workflow_btn.setEnabled(False)
+        button_layout.addWidget(self.run_workflow_btn)
 
         button_layout.addStretch()
 
@@ -279,8 +320,8 @@ class RecommendationDialog(QDialog):
 
         # Instructions
         instructions = QLabel(
-            "Describe your analysis goals and the AI will recommend the most suitable "
-            "satellite datasets, spectral indices, and processing workflow."
+            "Describe your analysis goals and get intelligent recommendations for "
+            "datasets, spectral indices, and processing workflows ready for QGIS."
         )
         instructions.setWordWrap(True)
         layout.addWidget(instructions)
@@ -294,12 +335,11 @@ class RecommendationDialog(QDialog):
         self.analysis_input = QTextEdit()
         self.analysis_input.setPlaceholderText(
             "Examples:\n"
-            "• I want to monitor crop health and predict yield in agricultural fields\n"
-            "• I need to map flood extent after heavy rainfall, even through clouds\n"
-            "• I want to analyze urban heat islands and temperature patterns\n"
-            "• I need to detect deforestation and forest degradation over time\n"
-            "• I want to monitor air quality and pollution levels in my city\n"
-            "• I need elevation data for watershed delineation and flood modeling"
+            "- I want to monitor crop health and predict yield\n"
+            "- Map flood extent after heavy rainfall\n"
+            "- Detect deforestation over time\n"
+            "- Analyze urban heat islands\n"
+            "- Assess fire damage and burn severity"
         )
         self.analysis_input.setMaximumHeight(100)
         input_layout.addWidget(self.analysis_input)
@@ -309,7 +349,7 @@ class RecommendationDialog(QDialog):
         location_layout.addWidget(QLabel("Location (optional):"))
 
         self.location_input = QTextEdit()
-        self.location_input.setPlaceholderText("e.g., California, USA or leave empty for global")
+        self.location_input.setPlaceholderText("e.g., California, USA")
         self.location_input.setMaximumHeight(30)
         location_layout.addWidget(self.location_input)
 
@@ -317,7 +357,6 @@ class RecommendationDialog(QDialog):
         location_layout.addWidget(self.use_map_extent)
 
         input_layout.addLayout(location_layout)
-
         layout.addWidget(input_group)
 
         # Get recommendations button
@@ -330,17 +369,24 @@ class RecommendationDialog(QDialog):
         self.progress_bar.setVisible(False)
         layout.addWidget(self.progress_bar)
 
-        # Results section
-        results_group = QGroupBox("Recommendations")
-        results_layout = QVBoxLayout(results_group)
+        # Results section with splitter
+        splitter = QSplitter(Qt.Vertical)
+
+        # Top: Primary info and datasets
+        top_widget = QWidget()
+        top_layout = QVBoxLayout(top_widget)
 
         # Primary recommendation
         self.primary_label = QLabel("Primary Dataset: -")
         self.primary_label.setFont(QFont("", 11, QFont.Bold))
-        results_layout.addWidget(self.primary_label)
+        top_layout.addWidget(self.primary_label)
+
+        # Workflow matched
+        self.workflow_label = QLabel("Matched Workflow: -")
+        top_layout.addWidget(self.workflow_label)
 
         # Dataset details table
-        results_layout.addWidget(QLabel("Recommended Datasets:"))
+        top_layout.addWidget(QLabel("Recommended Datasets:"))
         self.datasets_table = QTableWidget()
         self.datasets_table.setColumnCount(5)
         self.datasets_table.setHorizontalHeaderLabels([
@@ -348,57 +394,105 @@ class RecommendationDialog(QDialog):
         ])
         self.datasets_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.datasets_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
-        self.datasets_table.setMaximumHeight(150)
-        results_layout.addWidget(self.datasets_table)
+        self.datasets_table.setMaximumHeight(120)
+        top_layout.addWidget(self.datasets_table)
 
-        # Two columns for indices and workflow
-        details_layout = QHBoxLayout()
+        splitter.addWidget(top_widget)
 
-        # Indices
-        indices_group = QGroupBox("Suggested Indices")
+        # Middle: Indices and QGIS Steps
+        middle_widget = QWidget()
+        middle_layout = QHBoxLayout(middle_widget)
+
+        # Indices with formulas
+        indices_group = QGroupBox("Spectral Indices & QGIS Formulas")
         indices_layout = QVBoxLayout(indices_group)
-        self.indices_list = QListWidget()
-        self.indices_list.setMaximumHeight(100)
-        indices_layout.addWidget(self.indices_list)
-        details_layout.addWidget(indices_group)
+        self.indices_table = QTableWidget()
+        self.indices_table.setColumnCount(3)
+        self.indices_table.setHorizontalHeaderLabels(["Index", "Name", "QGIS Formula"])
+        self.indices_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.indices_table.setMaximumHeight(120)
+        indices_layout.addWidget(self.indices_table)
+        middle_layout.addWidget(indices_group)
 
-        # Workflow
-        workflow_group = QGroupBox("Processing Workflow")
+        # QGIS Workflow
+        workflow_group = QGroupBox("QGIS Processing Steps")
         workflow_layout = QVBoxLayout(workflow_group)
         self.workflow_list = QListWidget()
-        self.workflow_list.setMaximumHeight(100)
+        self.workflow_list.setMaximumHeight(120)
         workflow_layout.addWidget(self.workflow_list)
-        details_layout.addWidget(workflow_group)
+        middle_layout.addWidget(workflow_group)
 
-        results_layout.addLayout(details_layout)
+        splitter.addWidget(middle_widget)
 
-        # Reasoning
-        results_layout.addWidget(QLabel("Why these datasets:"))
-        self.reasoning_text = QTextEdit()
-        self.reasoning_text.setReadOnly(True)
-        self.reasoning_text.setMaximumHeight(60)
-        results_layout.addWidget(self.reasoning_text)
+        # Bottom: Tips
+        bottom_widget = QWidget()
+        bottom_layout = QHBoxLayout(bottom_widget)
 
-        # Tips
-        tips_layout = QHBoxLayout()
+        # Provider status
+        provider_group = QGroupBox("Provider Status")
+        provider_layout = QVBoxLayout(provider_group)
+        self.provider_status_label = QLabel("-")
+        self.provider_status_label.setWordWrap(True)
+        provider_layout.addWidget(self.provider_status_label)
+        bottom_layout.addWidget(provider_group)
 
-        cloud_group = QGroupBox("Cloud Cover Advice")
+        # Cloud cover advice
+        cloud_group = QGroupBox("Cloud Cover")
         cloud_layout = QVBoxLayout(cloud_group)
         self.cloud_label = QLabel("-")
         self.cloud_label.setWordWrap(True)
         cloud_layout.addWidget(self.cloud_label)
-        tips_layout.addWidget(cloud_group)
+        bottom_layout.addWidget(cloud_group)
 
-        temporal_group = QGroupBox("Temporal Advice")
+        # Temporal advice
+        temporal_group = QGroupBox("Temporal")
         temporal_layout = QVBoxLayout(temporal_group)
         self.temporal_label = QLabel("-")
         self.temporal_label.setWordWrap(True)
         temporal_layout.addWidget(self.temporal_label)
-        tips_layout.addWidget(temporal_group)
+        bottom_layout.addWidget(temporal_group)
 
-        results_layout.addLayout(tips_layout)
+        splitter.addWidget(bottom_widget)
 
-        layout.addWidget(results_group)
+        layout.addWidget(splitter)
+
+        return widget
+
+    def create_workflows_tab(self):
+        """Create the workflows browsing tab."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        layout.addWidget(QLabel("Browse predefined analysis workflows:"))
+
+        # Workflows table
+        self.workflows_table = QTableWidget()
+        self.workflows_table.setColumnCount(5)
+        self.workflows_table.setHorizontalHeaderLabels([
+            "Workflow", "Category", "Primary Dataset", "Indices", "Description"
+        ])
+        self.workflows_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.workflows_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.workflows_table.itemSelectionChanged.connect(self.on_workflow_selection)
+        layout.addWidget(self.workflows_table)
+
+        # Populate
+        if WORKFLOWS_AVAILABLE:
+            self.workflows_table.setRowCount(len(ANALYSIS_WORKFLOWS))
+            for i, (wf_id, wf) in enumerate(ANALYSIS_WORKFLOWS.items()):
+                self.workflows_table.setItem(i, 0, QTableWidgetItem(wf.name))
+                self.workflows_table.setItem(i, 1, QTableWidgetItem(wf.category.value))
+                self.workflows_table.setItem(i, 2, QTableWidgetItem(wf.primary_dataset))
+                self.workflows_table.setItem(i, 3, QTableWidgetItem(", ".join(wf.indices[:3])))
+                self.workflows_table.setItem(i, 4, QTableWidgetItem(wf.description[:80] + "..."))
+
+        # Workflow details
+        details_group = QGroupBox("Workflow Details")
+        details_layout = QVBoxLayout(details_group)
+        self.workflow_details = QTextEdit()
+        self.workflow_details.setReadOnly(True)
+        details_layout.addWidget(self.workflow_details)
+        layout.addWidget(details_group)
 
         return widget
 
@@ -409,7 +503,7 @@ class RecommendationDialog(QDialog):
 
         # Filter by category
         filter_layout = QHBoxLayout()
-        filter_layout.addWidget(QLabel("Filter by category:"))
+        filter_layout.addWidget(QLabel("Filter by:"))
 
         self.category_combo = QComboBox()
         self.category_combo.addItem("All Categories", None)
@@ -436,16 +530,64 @@ class RecommendationDialog(QDialog):
         # Dataset details
         details_group = QGroupBox("Dataset Details")
         details_layout = QVBoxLayout(details_group)
-
         self.details_text = QTextEdit()
         self.details_text.setReadOnly(True)
         self.details_text.setMaximumHeight(150)
         details_layout.addWidget(self.details_text)
-
         layout.addWidget(details_group)
 
         # Populate table
         self.populate_browse_table()
+
+        return widget
+
+    def create_provider_tab(self):
+        """Create the provider status tab."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        layout.addWidget(QLabel("EODAG Provider Configuration Status:"))
+
+        # Provider table
+        self.provider_table = QTableWidget()
+        self.provider_table.setColumnCount(5)
+        self.provider_table.setHorizontalHeaderLabels([
+            "Provider", "Name", "Free Access", "Configured", "Products"
+        ])
+        self.provider_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.provider_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.provider_table.itemSelectionChanged.connect(self.on_provider_selection)
+        layout.addWidget(self.provider_table)
+
+        # Populate
+        if WORKFLOWS_AVAILABLE:
+            config_mgr = get_config_manager()
+            self.provider_table.setRowCount(len(EODAG_PROVIDERS))
+
+            for i, (prov_id, prov) in enumerate(EODAG_PROVIDERS.items()):
+                is_configured = config_mgr.is_provider_configured(prov_id)
+                products_count = len([p for p in EODAG_PRODUCTS.values() if prov_id in p.providers])
+
+                self.provider_table.setItem(i, 0, QTableWidgetItem(prov_id))
+                self.provider_table.setItem(i, 1, QTableWidgetItem(prov.name))
+                self.provider_table.setItem(i, 2, QTableWidgetItem("Yes" if prov.free_access else "No"))
+
+                status_item = QTableWidgetItem("Yes" if is_configured else "No")
+                if is_configured:
+                    status_item.setBackground(QColor(200, 255, 200))
+                else:
+                    status_item.setBackground(QColor(255, 200, 200))
+                self.provider_table.setItem(i, 3, status_item)
+
+                self.provider_table.setItem(i, 4, QTableWidgetItem(str(products_count)))
+
+        # Setup instructions
+        setup_group = QGroupBox("Setup Instructions")
+        setup_layout = QVBoxLayout(setup_group)
+        self.setup_text = QTextEdit()
+        self.setup_text.setReadOnly(True)
+        setup_layout.addWidget(self.setup_text)
+        layout.addWidget(setup_group)
 
         return widget
 
@@ -456,19 +598,13 @@ class RecommendationDialog(QDialog):
         if not DATA_SOURCES_AVAILABLE:
             return
 
-        sources = DATA_SOURCES.values()
+        sources = list(DATA_SOURCES.values())
         if category:
             sources = [ds for ds in sources if ds.category == category]
 
-        self.browse_table.setRowCount(len(list(sources)))
+        self.browse_table.setRowCount(len(sources))
 
-        for i, ds in enumerate(DATA_SOURCES.values()):
-            if category and ds.category != category:
-                continue
-
-            row = self.browse_table.rowCount() - 1
-            self.browse_table.insertRow(row)
-
+        for i, ds in enumerate(sources):
             self.browse_table.setItem(i, 0, QTableWidgetItem(ds.id))
             self.browse_table.setItem(i, 1, QTableWidgetItem(ds.name))
             self.browse_table.setItem(i, 2, QTableWidgetItem(ds.category.value))
@@ -503,11 +639,81 @@ class RecommendationDialog(QDialog):
 <b>Cons:</b> {', '.join(ds.cons)}
 <br><br>
 <b>Suitable Indices:</b> {', '.join(ds.suitable_indices)}
-<br><br>
-<b>Bands:</b> {', '.join(ds.bands[:10])}{'...' if len(ds.bands) > 10 else ''}
 """
             self.details_text.setHtml(details)
             self.search_btn.setEnabled(True)
+
+    def on_workflow_selection(self):
+        """Show workflow details when selected."""
+        selected = self.workflows_table.selectedItems()
+        if not selected or not WORKFLOWS_AVAILABLE:
+            return
+
+        row = selected[0].row()
+        wf_name = self.workflows_table.item(row, 0).text()
+
+        # Find workflow by name
+        for wf_id, wf in ANALYSIS_WORKFLOWS.items():
+            if wf.name == wf_name:
+                details = f"""<h3>{wf.name}</h3>
+<p><b>Category:</b> {wf.category.value}</p>
+<p><b>Description:</b> {wf.description}</p>
+<p><b>Primary Dataset:</b> {wf.primary_dataset}</p>
+<p><b>Fallback Datasets:</b> {', '.join(wf.fallback_datasets)}</p>
+<p><b>Indices:</b> {', '.join(wf.indices)}</p>
+<p><b>Cloud Cover Max:</b> {wf.cloud_cover_max}%</p>
+<p><b>Temporal Requirement:</b> {wf.temporal_requirement}</p>
+<h4>Processing Steps:</h4>
+<ol>
+"""
+                for step in wf.steps:
+                    details += f"<li><b>{step.name}</b>: {step.description}</li>"
+                details += "</ol>"
+
+                # Add index formulas
+                details += "<h4>QGIS Raster Calculator Formulas:</h4>"
+                for idx in wf.indices:
+                    formula = get_qgis_formula(idx, "sentinel2")
+                    details += f"<p><b>{idx}:</b> <code>{formula}</code></p>"
+
+                self.workflow_details.setHtml(details)
+                self.run_workflow_btn.setEnabled(True)
+                break
+
+    def on_provider_selection(self):
+        """Show provider setup instructions."""
+        selected = self.provider_table.selectedItems()
+        if not selected or not WORKFLOWS_AVAILABLE:
+            return
+
+        row = selected[0].row()
+        prov_id = self.provider_table.item(row, 0).text()
+
+        if prov_id in EODAG_PROVIDERS:
+            prov = EODAG_PROVIDERS[prov_id]
+            config_mgr = get_config_manager()
+
+            setup = f"""<h3>{prov.name}</h3>
+<p><b>URL:</b> <a href="{prov.url}">{prov.url}</a></p>
+<p><b>Free Access:</b> {'Yes' if prov.free_access else 'No'}</p>
+<p><b>Currently Configured:</b> {'Yes' if config_mgr.is_provider_configured(prov_id) else 'No'}</p>
+"""
+            if prov.registration_url:
+                setup += f"<p><b>Registration:</b> <a href='{prov.registration_url}'>{prov.registration_url}</a></p>"
+
+            setup += f"""
+<h4>Configuration:</h4>
+<pre>{config_mgr.generate_config_snippet(prov_id)}</pre>
+
+<h4>Available Products:</h4>
+<ul>
+"""
+            for prod_id, prod in list(EODAG_PRODUCTS.items())[:10]:
+                if prov_id in prod.providers:
+                    setup += f"<li>{prod.title} ({prod_id})</li>"
+            setup += "</ul>"
+
+            self.setup_text.setHtml(setup)
 
     def get_recommendations(self):
         """Get AI recommendations."""
@@ -538,11 +744,11 @@ class RecommendationDialog(QDialog):
 
         # Update primary
         primary = result.get("primary_recommendation", "S2_MSI_L2A")
-        primary_name = DATA_SOURCES.get(primary, {})
-        if hasattr(primary_name, 'name'):
-            self.primary_label.setText(f"Primary Dataset: {primary_name.name} ({primary})")
-        else:
-            self.primary_label.setText(f"Primary Dataset: {primary}")
+        self.primary_label.setText(f"Primary Dataset: {primary}")
+
+        # Update workflow
+        wf_name = result.get("workflow_name", "-")
+        self.workflow_label.setText(f"Matched Workflow: {wf_name}")
 
         # Update datasets table
         details = result.get("dataset_details", [])
@@ -553,27 +759,66 @@ class RecommendationDialog(QDialog):
             self.datasets_table.setItem(i, 1, QTableWidgetItem(ds.get("category", "")))
             self.datasets_table.setItem(i, 2, QTableWidgetItem(str(ds.get("resolution_m", "N/A"))))
             self.datasets_table.setItem(i, 3, QTableWidgetItem(ds.get("provider", "")))
-            desc = ds.get("description", "")[:80] + "..." if len(ds.get("description", "")) > 80 else ds.get("description", "")
+            desc = ds.get("description", "")[:60] + "..." if len(ds.get("description", "")) > 60 else ds.get("description", "")
             self.datasets_table.setItem(i, 4, QTableWidgetItem(desc))
 
-        # Update indices
-        self.indices_list.clear()
-        for idx in result.get("suggested_indices", []):
-            self.indices_list.addItem(idx)
+        # Update indices table with formulas
+        indices_details = result.get("indices_details", [])
+        suggested = result.get("suggested_indices", [])
 
-        # Update workflow
+        if WORKFLOWS_AVAILABLE and not indices_details:
+            indices_details = [
+                {
+                    "name": idx,
+                    "full_name": SPECTRAL_INDICES.get(idx, {}).full_name if idx in SPECTRAL_INDICES else idx,
+                    "formula": get_qgis_formula(idx, "sentinel2")
+                }
+                for idx in suggested if idx in SPECTRAL_INDICES
+            ]
+
+        self.indices_table.setRowCount(len(indices_details) or len(suggested))
+
+        for i, idx in enumerate(indices_details or suggested):
+            if isinstance(idx, dict):
+                self.indices_table.setItem(i, 0, QTableWidgetItem(idx.get("name", "")))
+                self.indices_table.setItem(i, 1, QTableWidgetItem(idx.get("full_name", "")))
+                self.indices_table.setItem(i, 2, QTableWidgetItem(idx.get("formula", "")))
+            else:
+                self.indices_table.setItem(i, 0, QTableWidgetItem(idx))
+                if WORKFLOWS_AVAILABLE and idx in SPECTRAL_INDICES:
+                    si = SPECTRAL_INDICES[idx]
+                    self.indices_table.setItem(i, 1, QTableWidgetItem(si.full_name))
+                    self.indices_table.setItem(i, 2, QTableWidgetItem(get_qgis_formula(idx, "sentinel2")))
+
+        # Update workflow steps
         self.workflow_list.clear()
         for step in result.get("processing_workflow", []):
             self.workflow_list.addItem(step)
 
-        # Update reasoning
-        self.reasoning_text.setText(result.get("reasoning", ""))
+        # Update provider status
+        provider_status = result.get("provider_status", {})
+        if provider_status.get("status") == "available":
+            self.provider_status_label.setText(
+                f"Ready to use with: {provider_status.get('recommended_provider', 'Unknown')}"
+            )
+            self.provider_status_label.setStyleSheet("color: green;")
+        elif provider_status.get("status") == "setup_required":
+            setup_providers = provider_status.get("setup_required", [])
+            names = [p.get("name", p.get("provider", "")) for p in setup_providers[:2]]
+            self.provider_status_label.setText(
+                f"Setup required. Configure one of: {', '.join(names)}"
+            )
+            self.provider_status_label.setStyleSheet("color: orange;")
+        else:
+            self.provider_status_label.setText("-")
+            self.provider_status_label.setStyleSheet("")
 
         # Update tips
         self.cloud_label.setText(result.get("cloud_cover_advice", "-"))
         self.temporal_label.setText(result.get("temporal_advice", "-"))
 
         self.search_btn.setEnabled(True)
+        self.run_workflow_btn.setEnabled(bool(result.get("qgis_steps")))
 
     def on_recommendation_error(self, error_message):
         """Handle recommendation error."""
@@ -583,13 +828,11 @@ class RecommendationDialog(QDialog):
 
     def search_recommended(self):
         """Open search dialog with recommended dataset."""
-        # Get selected dataset
         selected_id = None
 
         if self.current_recommendation:
             selected_id = self.current_recommendation.get("primary_recommendation")
 
-        # Check browse table selection
         browse_selected = self.browse_table.selectedItems()
         if browse_selected:
             selected_id = self.browse_table.item(browse_selected[0].row(), 0).text()
@@ -597,15 +840,43 @@ class RecommendationDialog(QDialog):
         if not selected_id or not self.plugin:
             return
 
-        # Get the main dialog
         from .geodatahub_dialog import GeoDataHubDialog
 
         dlg = GeoDataHubDialog(parent=self.parent(), plugin=self.plugin)
-
-        # Pre-fill with recommendation
         location = self.location_input.toPlainText().strip()
         query = f"{selected_id} {location}" if location else selected_id
         dlg.search_input.setText(query)
-
         dlg.show()
         dlg.exec_()
+
+    def run_workflow(self):
+        """Show QGIS workflow execution guide."""
+        if not self.current_recommendation:
+            return
+
+        qgis_steps = self.current_recommendation.get("qgis_steps", [])
+        indices = self.current_recommendation.get("suggested_indices", [])
+
+        guide = "<h3>QGIS Workflow Guide</h3>"
+        guide += "<p>Follow these steps in QGIS:</p><ol>"
+
+        for step in qgis_steps:
+            if isinstance(step, dict):
+                guide += f"<li><b>{step.get('name', '')}</b>: {step.get('description', '')}"
+                if step.get('qgis_algorithm'):
+                    guide += f"<br><i>Algorithm: {step.get('qgis_algorithm')}</i>"
+                guide += "</li>"
+            else:
+                guide += f"<li>{step}</li>"
+
+        guide += "</ol>"
+
+        # Add formulas
+        if WORKFLOWS_AVAILABLE:
+            guide += "<h4>Copy-paste formulas for Raster Calculator:</h4>"
+            for idx in indices:
+                if idx in SPECTRAL_INDICES:
+                    formula = get_qgis_formula(idx, "sentinel2")
+                    guide += f"<p><b>{idx}:</b><br><code>{formula}</code></p>"
+
+        QMessageBox.information(self, "QGIS Workflow Guide", guide)
