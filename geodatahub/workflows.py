@@ -51,22 +51,19 @@ class WorkflowStep:
 @dataclass
 class AnalysisWorkflow:
     """Complete workflow for an analysis type."""
+    # Required fields (no defaults) must come first
     id: str
     name: str
     description: str
     category: AnalysisCategory
     keywords: List[str]
-
-    # Data requirements
     primary_dataset: str
     fallback_datasets: List[str]
-    alternate_dataset_sar: Optional[str] = None  # For cloud-free alternative
-
-    # Processing
     indices: List[str]
-    steps: List[WorkflowStep] = field(default_factory=list)
 
-    # Recommendations
+    # Optional fields (with defaults) come after
+    alternate_dataset_sar: Optional[str] = None  # For cloud-free alternative
+    steps: List[WorkflowStep] = field(default_factory=list)
     cloud_cover_max: int = 20
     temporal_requirement: str = "single"  # single, multi-date, before_after
     min_resolution_m: int = 30

@@ -1,8 +1,11 @@
 """
-AI Dataset Recommendation Dialog
+AI Dataset Recommendation Dialog - Chat-based Interface
 
-Provides intelligent dataset recommendations based on the user's analysis needs.
-Uses comprehensive workflow templates and EODAG catalog for diverse recommendations.
+Provides an intelligent chatbot interface for:
+- Natural language conversations about remote sensing analysis
+- AI-powered dataset recommendations
+- Workflow suggestions with QGIS formulas
+- Knowledge-based answers about satellite data
 """
 
 import os
@@ -15,9 +18,10 @@ from qgis.PyQt.QtWidgets import (
     QPushButton, QGroupBox, QListWidget, QListWidgetItem,
     QProgressBar, QMessageBox, QComboBox, QCheckBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QTabWidget, QWidget, QScrollArea, QFrame, QSplitter
+    QTabWidget, QWidget, QScrollArea, QFrame, QSplitter,
+    QLineEdit, QTextBrowser
 )
-from qgis.PyQt.QtGui import QFont, QColor
+from qgis.PyQt.QtGui import QFont, QColor, QTextCursor
 
 
 # Import geodatahub modules
@@ -27,7 +31,11 @@ parent_dir = os.path.dirname(plugin_dir)
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
-# Try importing new modules
+# Debug: Log the import path
+_IMPORT_ERROR = None
+_IMPORT_DEBUG = f"Plugin dir: {plugin_dir}, Parent dir: {parent_dir}"
+
+# Try importing modules
 try:
     from geodatahub.workflows import (
         ANALYSIS_WORKFLOWS, SPECTRAL_INDICES, AnalysisCategory,
@@ -41,234 +49,231 @@ try:
         get_config_manager, check_product_access
     )
     WORKFLOWS_AVAILABLE = True
-except ImportError:
+except ImportError as e:
+    _IMPORT_ERROR = str(e)
     WORKFLOWS_AVAILABLE = False
     ANALYSIS_WORKFLOWS = {}
     SPECTRAL_INDICES = {}
+    EODAG_PROVIDERS = {}
+    EODAG_PRODUCTS = {}
 
-# Fallback to data_sources if workflows not available
+    def get_workflow_recommendation(query):
+        return {"status": "no_match"}
+
+    def get_qgis_formula(index_name, sensor="sentinel2"):
+        return ""
+
+    def check_product_access(product_id):
+        return {"status": "unknown"}
+
+    def get_config_manager():
+        return None
+
+# Try importing LLM client
 try:
-    from geodatahub.data_sources import (
-        DATA_SOURCES, DataSource, DataCategory,
-        get_sources_for_analysis, get_sources_by_category,
-        get_all_sources_summary
-    )
-    DATA_SOURCES_AVAILABLE = True
+    from geodatahub.nlp.llm_client import get_llm_client
+    LLM_AVAILABLE = True
 except ImportError:
-    DATA_SOURCES_AVAILABLE = False
-    DATA_SOURCES = {}
+    LLM_AVAILABLE = False
+    def get_llm_client(provider="auto"):
+        return None
 
 
-class RecommendationWorker(QThread):
-    """Background worker for AI recommendations."""
+# =============================================================================
+# REMOTE SENSING KNOWLEDGE BASE
+# =============================================================================
 
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
+REMOTE_SENSING_KNOWLEDGE = """
+You are an expert remote sensing and GIS analyst assistant integrated into QGIS.
+You help users with satellite data analysis, dataset selection, and processing workflows.
 
-    def __init__(self, analysis_text, location, use_llm=True):
+## Your Capabilities:
+1. Recommend appropriate satellite datasets for specific analyses
+2. Explain spectral indices and their applications
+3. Provide QGIS processing workflow guidance
+4. Answer questions about remote sensing concepts
+5. Help with data provider setup and configuration
+
+## Available Datasets (EODAG):
+- **Sentinel-2 MSI (S2_MSI_L2A)**: 10m optical, best for vegetation, agriculture, land cover
+- **Sentinel-1 SAR (S1_SAR_GRD)**: 10m radar, works through clouds, flood/water mapping
+- **Landsat Collection 2 (LANDSAT_C2L2)**: 30m optical, long historical archive since 1972
+- **MODIS (MODIS_MOD09GA)**: 500m daily, large area monitoring
+- **Copernicus DEM (COP_DEM_GLO30)**: 30m elevation data
+- **Sentinel-3 OLCI**: 300m, ocean color and water quality
+- **Sentinel-5P**: Atmospheric data (NO2, O3, CO, CH4)
+- **ERA5**: Climate reanalysis data
+- **VIIRS DNB**: Nighttime lights
+
+## Key Spectral Indices:
+- **NDVI** = (NIR-RED)/(NIR+RED): Vegetation health, values 0.2-0.8 = healthy vegetation
+- **NDWI** = (GREEN-NIR)/(GREEN+NIR): Water detection, >0.3 = water
+- **MNDWI** = (GREEN-SWIR)/(GREEN+SWIR): Better water/urban discrimination
+- **NDBI** = (SWIR-NIR)/(SWIR+NIR): Built-up areas, >0 = urban
+- **NBR** = (NIR-SWIR2)/(NIR+SWIR2): Burn severity assessment
+- **EVI**: Enhanced vegetation index, better for high biomass areas
+- **SAVI**: Soil-adjusted vegetation index for sparse vegetation
+
+## Analysis Workflows:
+1. **Vegetation/Crop Health**: Use Sentinel-2, calculate NDVI/EVI, multi-temporal analysis
+2. **Water Detection**: Use Sentinel-2 with MNDWI, or Sentinel-1 SAR for cloudy conditions
+3. **Urban Mapping**: Use Sentinel-2 with NDBI and NDVI combination
+4. **Flood Mapping**: Use Sentinel-1 SAR (all-weather), compare pre/post images
+5. **Fire/Burn Assessment**: Use Sentinel-2 with NBR, calculate dNBR for severity
+6. **Terrain Analysis**: Use Copernicus DEM for slope, aspect, hillshade
+
+## QGIS Raster Calculator Formulas (Sentinel-2):
+- NDVI: (B08@1 - B04@1) / (B08@1 + B04@1)
+- NDWI: (B03@1 - B08@1) / (B03@1 + B08@1)
+- MNDWI: (B03@1 - B11@1) / (B03@1 + B11@1)
+- NDBI: (B11@1 - B08@1) / (B11@1 + B08@1)
+- NBR: (B08@1 - B12@1) / (B08@1 + B12@1)
+
+## Data Providers:
+- **Copernicus Data Space**: Free, requires registration, all Sentinel data
+- **Earth Search (AWS)**: Free, no auth needed for some products
+- **Planetary Computer**: Free, Microsoft's geospatial platform
+- **USGS Earth Explorer**: Free, Landsat data
+
+When recommending datasets, always consider:
+1. Required spatial resolution
+2. Temporal requirements (single date vs time series)
+3. Cloud cover constraints (suggest SAR for cloudy regions)
+4. Data availability and access
+"""
+
+
+def build_ai_prompt(user_message: str, conversation_history: list) -> str:
+    """Build a comprehensive prompt for the AI."""
+
+    # Build available data context
+    datasets_info = ""
+    if WORKFLOWS_AVAILABLE and EODAG_PRODUCTS:
+        datasets_info = "\n## Currently Available Datasets:\n"
+        for pid, p in list(EODAG_PRODUCTS.items())[:15]:
+            datasets_info += f"- {p.title} ({pid}): {p.resolution_m}m, {p.sensor_type}, providers: {', '.join(p.providers[:2])}\n"
+
+    workflows_info = ""
+    if WORKFLOWS_AVAILABLE and ANALYSIS_WORKFLOWS:
+        workflows_info = "\n## Predefined Workflows:\n"
+        for wid, w in ANALYSIS_WORKFLOWS.items():
+            workflows_info += f"- {w.name}: {w.description[:100]}... Indices: {', '.join(w.indices)}\n"
+
+    # Build conversation context
+    history_text = ""
+    if conversation_history:
+        history_text = "\n## Previous Conversation:\n"
+        for msg in conversation_history[-6:]:  # Last 6 messages
+            role = "User" if msg["role"] == "user" else "Assistant"
+            history_text += f"{role}: {msg['content'][:300]}\n"
+
+    prompt = f"""{REMOTE_SENSING_KNOWLEDGE}
+{datasets_info}
+{workflows_info}
+{history_text}
+
+## Current User Message:
+{user_message}
+
+## Instructions:
+- If the user asks about analysis or datasets, recommend specific datasets with IDs (like S2_MSI_L2A)
+- If recommending spectral indices, provide the QGIS raster calculator formula
+- If the user has a complex question, answer from your remote sensing knowledge
+- Be conversational and helpful
+- Always be specific with dataset names and processing steps
+- If suggesting workflows, include step-by-step QGIS instructions
+
+Respond naturally and helpfully:"""
+
+    return prompt
+
+
+class AIWorker(QThread):
+    """Background worker for AI responses."""
+
+    response_ready = pyqtSignal(str)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, prompt: str):
         super().__init__()
-        self.analysis_text = analysis_text
-        self.location = location
-        self.use_llm = use_llm
+        self.prompt = prompt
 
     def run(self):
         try:
-            if WORKFLOWS_AVAILABLE:
-                result = self.get_workflow_recommendation()
-            elif self.use_llm:
-                result = self.get_llm_recommendation()
+            client = get_llm_client("auto")
+            if client:
+                response = client.complete(self.prompt)
+                self.response_ready.emit(response)
             else:
-                result = self.get_catalog_recommendation()
-
-            self.finished.emit(result)
-
+                # Fallback to rule-based response
+                response = self.generate_fallback_response()
+                self.response_ready.emit(response)
         except Exception as e:
-            self.error.emit(str(e))
+            self.error_occurred.emit(str(e))
 
-    def get_workflow_recommendation(self):
-        """Get recommendation using workflow templates."""
-        recommendation = get_workflow_recommendation(self.analysis_text)
+    def generate_fallback_response(self):
+        """Generate rule-based response when LLM not available."""
+        prompt_lower = self.prompt.lower()
 
-        if recommendation.get("status") == "no_match":
-            return self.get_catalog_recommendation()
+        # Check for workflow matches
+        if WORKFLOWS_AVAILABLE:
+            rec = get_workflow_recommendation(prompt_lower)
+            if rec.get("status") == "matched":
+                wf = rec.get("recommended_workflow", {})
+                indices_info = ""
+                for idx in wf.get("indices", []):
+                    formula = get_qgis_formula(idx, "sentinel2")
+                    if formula:
+                        indices_info += f"\n- **{idx}**: `{formula}`"
 
-        workflow = recommendation.get("recommended_workflow", {})
+                return f"""Based on your query, I recommend the **{wf.get('name')}** workflow.
 
-        # Check provider access
-        primary_dataset = workflow.get("primary_dataset", "S2_MSI_L2A")
-        provider_check = check_product_access(primary_dataset)
+**Primary Dataset:** {wf.get('primary_dataset')}
+**Alternative Datasets:** {', '.join(wf.get('fallback_datasets', []))}
 
-        # Build result
-        result = {
-            "workflow_id": workflow.get("id"),
-            "workflow_name": workflow.get("name"),
-            "recommended_datasets": [primary_dataset] + workflow.get("fallback_datasets", []),
-            "primary_recommendation": primary_dataset,
-            "reasoning": workflow.get("description", ""),
-            "suggested_indices": workflow.get("indices", []),
-            "processing_workflow": [
-                f"{s['order']}. {s['name']}: {s['description']}"
-                for s in workflow.get("steps", [])
-            ],
-            "qgis_steps": workflow.get("steps", []),
-            "cloud_cover_max": workflow.get("cloud_cover_max", 20),
-            "temporal_requirement": workflow.get("temporal_requirement", "single"),
-            "indices_details": recommendation.get("indices_details", []),
-            "provider_status": provider_check,
-            "alternative_workflows": recommendation.get("alternative_workflows", []),
-            "dataset_details": []
-        }
+**Recommended Spectral Indices:**{indices_info}
 
-        # Add dataset details from EODAG catalog
-        for ds_id in result["recommended_datasets"]:
-            if ds_id in EODAG_PRODUCTS:
-                product = EODAG_PRODUCTS[ds_id]
-                result["dataset_details"].append({
-                    "id": product.id,
-                    "name": product.title,
-                    "category": product.sensor_type,
-                    "resolution_m": product.resolution_m,
-                    "provider": ", ".join(product.providers[:2]),
-                    "description": product.description,
-                    "platform": product.platform
-                })
-            elif DATA_SOURCES_AVAILABLE and ds_id in DATA_SOURCES:
-                ds = DATA_SOURCES[ds_id]
-                result["dataset_details"].append({
-                    "id": ds.id,
-                    "name": ds.name,
-                    "category": ds.category.value,
-                    "resolution_m": ds.resolution_m,
-                    "provider": ds.provider,
-                    "description": ds.description,
-                    "pros": ds.pros,
-                    "cons": ds.cons
-                })
+**Processing Steps:**
+{chr(10).join(f"{i+1}. {s.get('name')}: {s.get('description')}" for i, s in enumerate(wf.get('steps', [])))}
 
-        # Add advice based on workflow
-        if workflow.get("category") == "flood" or "sar" in str(workflow).lower():
-            result["cloud_cover_advice"] = "SAR works through clouds - no cloud cover filter needed."
-        else:
-            result["cloud_cover_advice"] = f"Use <{result['cloud_cover_max']}% cloud cover for optical analysis."
+**Tips:**
+- Use cloud cover < {wf.get('cloud_cover_max', 20)}% for optical data
+- Temporal requirement: {wf.get('temporal_requirement', 'single')}
 
-        temporal = result["temporal_requirement"]
-        if temporal == "before_after":
-            result["temporal_advice"] = "You need imagery from before AND after the event for change detection."
-        elif temporal == "multi-date":
-            result["temporal_advice"] = "Multiple dates recommended for time series analysis."
-        else:
-            result["temporal_advice"] = "Single date imagery is sufficient for this analysis."
+Would you like more details about any of these steps?"""
 
-        return result
+        # Generic helpful response
+        return """I can help you with remote sensing analysis! Here are some things I can assist with:
 
-    def get_llm_recommendation(self):
-        """Get recommendation using LLM."""
-        try:
-            from geodatahub.nlp.llm_client import get_llm_client
+1. **Dataset Recommendations** - Tell me what you want to analyze (vegetation, water, urban areas, etc.)
+2. **Spectral Indices** - I can provide QGIS formulas for NDVI, NDWI, NDBI, NBR, etc.
+3. **Workflow Guidance** - Step-by-step processing instructions for QGIS
+4. **Data Access** - Help with setting up data providers
 
-            client = get_llm_client()
-            if not client:
-                return self.get_catalog_recommendation()
+Try asking something like:
+- "I want to monitor crop health in my farm"
+- "How do I detect water bodies?"
+- "What's the best data for flood mapping?"
+- "Give me the NDVI formula for Sentinel-2"
 
-            # Build prompt with workflow context
-            prompt = self._build_llm_prompt()
-            response = client.complete(prompt)
-
-            # Parse JSON from response
-            try:
-                start = response.find('{')
-                end = response.rfind('}') + 1
-                if start >= 0 and end > start:
-                    json_str = response[start:end]
-                    return json.loads(json_str)
-            except json.JSONDecodeError:
-                pass
-
-            return self.get_catalog_recommendation()
-
-        except Exception:
-            return self.get_catalog_recommendation()
-
-    def _build_llm_prompt(self):
-        """Build LLM prompt with workflow context."""
-        workflows_str = ""
-        for wf_id, wf in ANALYSIS_WORKFLOWS.items():
-            workflows_str += f"- {wf.name}: {wf.description} (Dataset: {wf.primary_dataset})\n"
-
-        return f"""You are a remote sensing expert. Recommend datasets for this analysis:
-
-User's analysis: {self.analysis_text}
-Location: {self.location or "Not specified"}
-
-Available workflows:
-{workflows_str}
-
-Respond in JSON format with recommended_datasets, reasoning, suggested_indices, processing_workflow."""
-
-    def get_catalog_recommendation(self):
-        """Get recommendation from data sources catalog."""
-        if not DATA_SOURCES_AVAILABLE:
-            return self._fallback_recommendation()
-
-        recommended_sources = get_sources_for_analysis(self.analysis_text)
-
-        if not recommended_sources:
-            recommended_sources = [DATA_SOURCES.get("S2_MSI_L2A")]
-
-        result = {
-            "recommended_datasets": [ds.id for ds in recommended_sources if ds],
-            "primary_recommendation": recommended_sources[0].id if recommended_sources else "S2_MSI_L2A",
-            "reasoning": "",
-            "suggested_indices": [],
-            "processing_workflow": [],
-            "dataset_details": []
-        }
-
-        all_indices = set()
-        for ds in recommended_sources:
-            if ds:
-                all_indices.update(ds.suitable_indices)
-                result["dataset_details"].append({
-                    "id": ds.id,
-                    "name": ds.name,
-                    "category": ds.category.value,
-                    "resolution_m": ds.resolution_m,
-                    "provider": ds.provider,
-                    "description": ds.description,
-                    "pros": ds.pros,
-                    "cons": ds.cons
-                })
-
-        result["suggested_indices"] = list(all_indices)[:6]
-        result["reasoning"] = "Based on keyword matching with your analysis requirements."
-
-        return result
-
-    def _fallback_recommendation(self):
-        """Fallback when no modules available."""
-        return {
-            "recommended_datasets": ["S2_MSI_L2A"],
-            "primary_recommendation": "S2_MSI_L2A",
-            "reasoning": "Sentinel-2 is recommended as a versatile optical dataset.",
-            "suggested_indices": ["NDVI", "NDWI"],
-            "dataset_details": []
-        }
+Note: For full AI capabilities, please configure your GROQ_API_KEY."""
 
 
 class RecommendationDialog(QDialog):
-    """Dialog for AI-powered dataset recommendations with QGIS workflow integration."""
+    """Chat-based AI recommendation dialog for QGIS."""
 
     def __init__(self, parent=None, plugin=None):
         super().__init__(parent)
         self.plugin = plugin
-        self.current_recommendation = None
+        self.conversation_history = []
+        self.current_recommendations = {}
 
         self.setup_ui()
 
     def setup_ui(self):
         """Set up the dialog UI."""
-        self.setWindowTitle("AI Dataset Recommendations & Workflows")
-        self.setMinimumSize(1000, 800)
+        self.setWindowTitle("GeoDataHub AI Assistant")
+        self.setMinimumSize(900, 700)
 
         layout = QVBoxLayout(self)
 
@@ -276,242 +281,178 @@ class RecommendationDialog(QDialog):
         tabs = QTabWidget()
         layout.addWidget(tabs)
 
-        # Tab 1: AI Recommendations
-        recommend_tab = self.create_recommend_tab()
-        tabs.addTab(recommend_tab, "AI Recommendations")
+        # Tab 1: AI Chat (Main)
+        chat_tab = self.create_chat_tab()
+        tabs.addTab(chat_tab, "AI Assistant")
 
-        # Tab 2: Browse Workflows
-        workflows_tab = self.create_workflows_tab()
-        tabs.addTab(workflows_tab, "Analysis Workflows")
-
-        # Tab 3: Browse Datasets
+        # Tab 2: Browse Datasets
         browse_tab = self.create_browse_tab()
         tabs.addTab(browse_tab, "Browse Datasets")
 
-        # Tab 4: Provider Status
+        # Tab 3: Provider Status
         provider_tab = self.create_provider_tab()
         tabs.addTab(provider_tab, "Provider Status")
 
-        # Action buttons
-        button_layout = QHBoxLayout()
+        # Status bar
+        self.status_label = QLabel("")
+        layout.addWidget(self.status_label)
 
-        self.search_btn = QPushButton("Search for Selected Data")
+    def create_chat_tab(self):
+        """Create the main AI chat interface."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        # Header with status
+        header_layout = QHBoxLayout()
+
+        title = QLabel("<h3>GeoDataHub AI Assistant</h3>")
+        header_layout.addWidget(title)
+
+        header_layout.addStretch()
+
+        # LLM status indicator
+        if LLM_AVAILABLE:
+            client = get_llm_client("auto")
+            if client:
+                status = QLabel("AI: Connected")
+                status.setStyleSheet("color: green; font-weight: bold;")
+            else:
+                status = QLabel("AI: Using fallback (set GROQ_API_KEY for full AI)")
+                status.setStyleSheet("color: orange;")
+        else:
+            status = QLabel("AI: Limited mode")
+            status.setStyleSheet("color: orange;")
+        header_layout.addWidget(status)
+
+        layout.addLayout(header_layout)
+
+        # Chat display area
+        self.chat_display = QTextBrowser()
+        self.chat_display.setOpenExternalLinks(True)
+        self.chat_display.setMinimumHeight(350)
+
+        # Welcome message
+        welcome = """<div style="padding: 10px; background-color: #e8f4f8; border-radius: 8px; margin: 5px;">
+<b>Welcome to GeoDataHub AI Assistant!</b><br><br>
+I'm your intelligent remote sensing analyst. I can help you with:
+<ul>
+<li><b>Dataset recommendations</b> - Tell me what you want to analyze</li>
+<li><b>Spectral indices</b> - NDVI, NDWI, NDBI formulas for QGIS</li>
+<li><b>Processing workflows</b> - Step-by-step QGIS guidance</li>
+<li><b>Remote sensing questions</b> - Ask me anything!</li>
+</ul>
+<br>
+<b>Try asking:</b>
+<ul>
+<li>"I want to monitor vegetation health in agricultural fields"</li>
+<li>"What's the best satellite data for flood mapping?"</li>
+<li>"How do I calculate NDVI in QGIS?"</li>
+<li>"Compare Sentinel-2 and Landsat for my analysis"</li>
+</ul>
+</div>"""
+        self.chat_display.setHtml(welcome)
+        layout.addWidget(self.chat_display)
+
+        # Recommendations panel (collapsible)
+        self.rec_panel = QGroupBox("Current Recommendations")
+        rec_layout = QVBoxLayout(self.rec_panel)
+
+        self.rec_table = QTableWidget()
+        self.rec_table.setColumnCount(4)
+        self.rec_table.setHorizontalHeaderLabels(["Dataset", "Resolution", "Type", "Use For"])
+        self.rec_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.rec_table.setMaximumHeight(120)
+        self.rec_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        rec_layout.addWidget(self.rec_table)
+
+        self.rec_panel.setVisible(False)
+        layout.addWidget(self.rec_panel)
+
+        # Input area
+        input_group = QGroupBox("Ask me anything about remote sensing analysis")
+        input_layout = QVBoxLayout(input_group)
+
+        # Message input
+        msg_layout = QHBoxLayout()
+
+        self.message_input = QLineEdit()
+        self.message_input.setPlaceholderText("Type your question here... (e.g., 'I want to detect deforestation over time')")
+        self.message_input.returnPressed.connect(self.send_message)
+        msg_layout.addWidget(self.message_input)
+
+        self.send_btn = QPushButton("Send")
+        self.send_btn.clicked.connect(self.send_message)
+        self.send_btn.setMinimumWidth(80)
+        msg_layout.addWidget(self.send_btn)
+
+        input_layout.addLayout(msg_layout)
+
+        # Quick action buttons
+        quick_layout = QHBoxLayout()
+        quick_layout.addWidget(QLabel("Quick:"))
+
+        quick_buttons = [
+            ("Vegetation Analysis", "What datasets and indices should I use for vegetation health monitoring?"),
+            ("Water Detection", "How do I detect and map water bodies?"),
+            ("Urban Mapping", "What's the best approach for mapping urban areas?"),
+            ("Flood Mapping", "I need to map flood extent, what should I use?"),
+        ]
+
+        for label, query in quick_buttons:
+            btn = QPushButton(label)
+            btn.setMaximumWidth(120)
+            btn.clicked.connect(lambda checked, q=query: self.quick_query(q))
+            quick_layout.addWidget(btn)
+
+        quick_layout.addStretch()
+        input_layout.addLayout(quick_layout)
+
+        layout.addWidget(input_group)
+
+        # Progress
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        layout.addWidget(self.progress)
+
+        # Action buttons
+        action_layout = QHBoxLayout()
+
+        self.search_btn = QPushButton("Search for Recommended Data")
         self.search_btn.clicked.connect(self.search_recommended)
         self.search_btn.setEnabled(False)
-        button_layout.addWidget(self.search_btn)
+        action_layout.addWidget(self.search_btn)
 
-        self.run_workflow_btn = QPushButton("Run Workflow in QGIS")
-        self.run_workflow_btn.clicked.connect(self.run_workflow)
-        self.run_workflow_btn.setEnabled(False)
-        button_layout.addWidget(self.run_workflow_btn)
+        clear_btn = QPushButton("Clear Chat")
+        clear_btn.clicked.connect(self.clear_chat)
+        action_layout.addWidget(clear_btn)
 
-        button_layout.addStretch()
+        action_layout.addStretch()
 
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
-        button_layout.addWidget(close_btn)
+        action_layout.addWidget(close_btn)
 
-        layout.addLayout(button_layout)
-
-    def create_recommend_tab(self):
-        """Create the AI recommendations tab."""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-
-        # Instructions
-        instructions = QLabel(
-            "Describe your analysis goals and get intelligent recommendations for "
-            "datasets, spectral indices, and processing workflows ready for QGIS."
-        )
-        instructions.setWordWrap(True)
-        layout.addWidget(instructions)
-
-        # Input section
-        input_group = QGroupBox("Describe Your Analysis")
-        input_layout = QVBoxLayout(input_group)
-
-        input_layout.addWidget(QLabel("What do you want to analyze?"))
-
-        self.analysis_input = QTextEdit()
-        self.analysis_input.setPlaceholderText(
-            "Examples:\n"
-            "- I want to monitor crop health and predict yield\n"
-            "- Map flood extent after heavy rainfall\n"
-            "- Detect deforestation over time\n"
-            "- Analyze urban heat islands\n"
-            "- Assess fire damage and burn severity"
-        )
-        self.analysis_input.setMaximumHeight(100)
-        input_layout.addWidget(self.analysis_input)
-
-        # Location
-        location_layout = QHBoxLayout()
-        location_layout.addWidget(QLabel("Location (optional):"))
-
-        self.location_input = QTextEdit()
-        self.location_input.setPlaceholderText("e.g., California, USA")
-        self.location_input.setMaximumHeight(30)
-        location_layout.addWidget(self.location_input)
-
-        self.use_map_extent = QCheckBox("Use current map extent")
-        location_layout.addWidget(self.use_map_extent)
-
-        input_layout.addLayout(location_layout)
-        layout.addWidget(input_group)
-
-        # Get recommendations button
-        self.recommend_btn = QPushButton("Get AI Recommendations")
-        self.recommend_btn.clicked.connect(self.get_recommendations)
-        layout.addWidget(self.recommend_btn)
-
-        # Progress
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
-
-        # Results section with splitter
-        splitter = QSplitter(Qt.Vertical)
-
-        # Top: Primary info and datasets
-        top_widget = QWidget()
-        top_layout = QVBoxLayout(top_widget)
-
-        # Primary recommendation
-        self.primary_label = QLabel("Primary Dataset: -")
-        self.primary_label.setFont(QFont("", 11, QFont.Bold))
-        top_layout.addWidget(self.primary_label)
-
-        # Workflow matched
-        self.workflow_label = QLabel("Matched Workflow: -")
-        top_layout.addWidget(self.workflow_label)
-
-        # Dataset details table
-        top_layout.addWidget(QLabel("Recommended Datasets:"))
-        self.datasets_table = QTableWidget()
-        self.datasets_table.setColumnCount(5)
-        self.datasets_table.setHorizontalHeaderLabels([
-            "Dataset", "Category", "Resolution", "Provider", "Description"
-        ])
-        self.datasets_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.datasets_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
-        self.datasets_table.setMaximumHeight(120)
-        top_layout.addWidget(self.datasets_table)
-
-        splitter.addWidget(top_widget)
-
-        # Middle: Indices and QGIS Steps
-        middle_widget = QWidget()
-        middle_layout = QHBoxLayout(middle_widget)
-
-        # Indices with formulas
-        indices_group = QGroupBox("Spectral Indices & QGIS Formulas")
-        indices_layout = QVBoxLayout(indices_group)
-        self.indices_table = QTableWidget()
-        self.indices_table.setColumnCount(3)
-        self.indices_table.setHorizontalHeaderLabels(["Index", "Name", "QGIS Formula"])
-        self.indices_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.indices_table.setMaximumHeight(120)
-        indices_layout.addWidget(self.indices_table)
-        middle_layout.addWidget(indices_group)
-
-        # QGIS Workflow
-        workflow_group = QGroupBox("QGIS Processing Steps")
-        workflow_layout = QVBoxLayout(workflow_group)
-        self.workflow_list = QListWidget()
-        self.workflow_list.setMaximumHeight(120)
-        workflow_layout.addWidget(self.workflow_list)
-        middle_layout.addWidget(workflow_group)
-
-        splitter.addWidget(middle_widget)
-
-        # Bottom: Tips
-        bottom_widget = QWidget()
-        bottom_layout = QHBoxLayout(bottom_widget)
-
-        # Provider status
-        provider_group = QGroupBox("Provider Status")
-        provider_layout = QVBoxLayout(provider_group)
-        self.provider_status_label = QLabel("-")
-        self.provider_status_label.setWordWrap(True)
-        provider_layout.addWidget(self.provider_status_label)
-        bottom_layout.addWidget(provider_group)
-
-        # Cloud cover advice
-        cloud_group = QGroupBox("Cloud Cover")
-        cloud_layout = QVBoxLayout(cloud_group)
-        self.cloud_label = QLabel("-")
-        self.cloud_label.setWordWrap(True)
-        cloud_layout.addWidget(self.cloud_label)
-        bottom_layout.addWidget(cloud_group)
-
-        # Temporal advice
-        temporal_group = QGroupBox("Temporal")
-        temporal_layout = QVBoxLayout(temporal_group)
-        self.temporal_label = QLabel("-")
-        self.temporal_label.setWordWrap(True)
-        temporal_layout.addWidget(self.temporal_label)
-        bottom_layout.addWidget(temporal_group)
-
-        splitter.addWidget(bottom_widget)
-
-        layout.addWidget(splitter)
-
-        return widget
-
-    def create_workflows_tab(self):
-        """Create the workflows browsing tab."""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-
-        layout.addWidget(QLabel("Browse predefined analysis workflows:"))
-
-        # Workflows table
-        self.workflows_table = QTableWidget()
-        self.workflows_table.setColumnCount(5)
-        self.workflows_table.setHorizontalHeaderLabels([
-            "Workflow", "Category", "Primary Dataset", "Indices", "Description"
-        ])
-        self.workflows_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.workflows_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
-        self.workflows_table.itemSelectionChanged.connect(self.on_workflow_selection)
-        layout.addWidget(self.workflows_table)
-
-        # Populate
-        if WORKFLOWS_AVAILABLE:
-            self.workflows_table.setRowCount(len(ANALYSIS_WORKFLOWS))
-            for i, (wf_id, wf) in enumerate(ANALYSIS_WORKFLOWS.items()):
-                self.workflows_table.setItem(i, 0, QTableWidgetItem(wf.name))
-                self.workflows_table.setItem(i, 1, QTableWidgetItem(wf.category.value))
-                self.workflows_table.setItem(i, 2, QTableWidgetItem(wf.primary_dataset))
-                self.workflows_table.setItem(i, 3, QTableWidgetItem(", ".join(wf.indices[:3])))
-                self.workflows_table.setItem(i, 4, QTableWidgetItem(wf.description[:80] + "..."))
-
-        # Workflow details
-        details_group = QGroupBox("Workflow Details")
-        details_layout = QVBoxLayout(details_group)
-        self.workflow_details = QTextEdit()
-        self.workflow_details.setReadOnly(True)
-        details_layout.addWidget(self.workflow_details)
-        layout.addWidget(details_group)
+        layout.addLayout(action_layout)
 
         return widget
 
     def create_browse_tab(self):
-        """Create the browse all datasets tab."""
+        """Create the browse datasets tab."""
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
-        # Filter by category
+        # Filter
         filter_layout = QHBoxLayout()
-        filter_layout.addWidget(QLabel("Filter by:"))
+        filter_layout.addWidget(QLabel("Filter by sensor type:"))
 
-        self.category_combo = QComboBox()
-        self.category_combo.addItem("All Categories", None)
-        if DATA_SOURCES_AVAILABLE:
-            for cat in DataCategory:
-                self.category_combo.addItem(cat.value.title(), cat)
-        self.category_combo.currentIndexChanged.connect(self.filter_datasets)
-        filter_layout.addWidget(self.category_combo)
+        self.sensor_combo = QComboBox()
+        self.sensor_combo.addItem("All Types", None)
+        if WORKFLOWS_AVAILABLE and EODAG_PRODUCTS:
+            sensor_types = sorted(set(p.sensor_type for p in EODAG_PRODUCTS.values() if p.sensor_type))
+            for st in sensor_types:
+                self.sensor_combo.addItem(st.title(), st)
+        self.sensor_combo.currentIndexChanged.connect(self.filter_datasets)
+        filter_layout.addWidget(self.sensor_combo)
 
         filter_layout.addStretch()
         layout.addLayout(filter_layout)
@@ -520,167 +461,127 @@ class RecommendationDialog(QDialog):
         self.browse_table = QTableWidget()
         self.browse_table.setColumnCount(6)
         self.browse_table.setHorizontalHeaderLabels([
-            "ID", "Name", "Category", "Resolution (m)", "Provider", "Use Cases"
+            "ID", "Name", "Type", "Resolution", "Providers", "Keywords"
         ])
         self.browse_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.browse_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
-        self.browse_table.itemSelectionChanged.connect(self.on_browse_selection)
+        self.browse_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.browse_table.itemSelectionChanged.connect(self.on_dataset_selected)
         layout.addWidget(self.browse_table)
 
         # Dataset details
         details_group = QGroupBox("Dataset Details")
         details_layout = QVBoxLayout(details_group)
-        self.details_text = QTextEdit()
-        self.details_text.setReadOnly(True)
-        self.details_text.setMaximumHeight(150)
-        details_layout.addWidget(self.details_text)
+        self.dataset_details = QTextBrowser()
+        self.dataset_details.setMaximumHeight(150)
+        details_layout.addWidget(self.dataset_details)
         layout.addWidget(details_group)
 
-        # Populate table
-        self.populate_browse_table()
+        # Populate
+        self.populate_datasets()
 
         return widget
 
     def create_provider_tab(self):
-        """Create the provider status tab."""
+        """Create provider status tab."""
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
         layout.addWidget(QLabel("EODAG Provider Configuration Status:"))
 
-        # Provider table
         self.provider_table = QTableWidget()
         self.provider_table.setColumnCount(5)
         self.provider_table.setHorizontalHeaderLabels([
-            "Provider", "Name", "Free Access", "Configured", "Products"
+            "Provider", "Name", "Free", "Configured", "Products"
         ])
         self.provider_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.provider_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.provider_table.itemSelectionChanged.connect(self.on_provider_selection)
+        self.provider_table.itemSelectionChanged.connect(self.on_provider_selected)
         layout.addWidget(self.provider_table)
-
-        # Populate
-        if WORKFLOWS_AVAILABLE:
-            config_mgr = get_config_manager()
-            self.provider_table.setRowCount(len(EODAG_PROVIDERS))
-
-            for i, (prov_id, prov) in enumerate(EODAG_PROVIDERS.items()):
-                is_configured = config_mgr.is_provider_configured(prov_id)
-                products_count = len([p for p in EODAG_PRODUCTS.values() if prov_id in p.providers])
-
-                self.provider_table.setItem(i, 0, QTableWidgetItem(prov_id))
-                self.provider_table.setItem(i, 1, QTableWidgetItem(prov.name))
-                self.provider_table.setItem(i, 2, QTableWidgetItem("Yes" if prov.free_access else "No"))
-
-                status_item = QTableWidgetItem("Yes" if is_configured else "No")
-                if is_configured:
-                    status_item.setBackground(QColor(200, 255, 200))
-                else:
-                    status_item.setBackground(QColor(255, 200, 200))
-                self.provider_table.setItem(i, 3, status_item)
-
-                self.provider_table.setItem(i, 4, QTableWidgetItem(str(products_count)))
 
         # Setup instructions
         setup_group = QGroupBox("Setup Instructions")
         setup_layout = QVBoxLayout(setup_group)
-        self.setup_text = QTextEdit()
-        self.setup_text.setReadOnly(True)
+        self.setup_text = QTextBrowser()
         setup_layout.addWidget(self.setup_text)
         layout.addWidget(setup_group)
 
+        # Populate providers
+        self.populate_providers()
+
         return widget
 
-    def populate_browse_table(self, category=None):
-        """Populate the browse table with datasets."""
+    def populate_datasets(self, sensor_type=None):
+        """Populate datasets table."""
         self.browse_table.setRowCount(0)
 
-        if not DATA_SOURCES_AVAILABLE:
+        if not WORKFLOWS_AVAILABLE or not EODAG_PRODUCTS:
             return
 
-        sources = list(DATA_SOURCES.values())
-        if category:
-            sources = [ds for ds in sources if ds.category == category]
+        products = list(EODAG_PRODUCTS.values())
+        if sensor_type:
+            products = [p for p in products if p.sensor_type == sensor_type]
 
-        self.browse_table.setRowCount(len(sources))
+        self.browse_table.setRowCount(len(products))
 
-        for i, ds in enumerate(sources):
-            self.browse_table.setItem(i, 0, QTableWidgetItem(ds.id))
-            self.browse_table.setItem(i, 1, QTableWidgetItem(ds.name))
-            self.browse_table.setItem(i, 2, QTableWidgetItem(ds.category.value))
-            self.browse_table.setItem(i, 3, QTableWidgetItem(str(ds.resolution_m) if ds.resolution_m else "N/A"))
-            self.browse_table.setItem(i, 4, QTableWidgetItem(ds.provider))
-            self.browse_table.setItem(i, 5, QTableWidgetItem(", ".join(ds.use_cases[:3])))
+        for i, p in enumerate(products):
+            self.browse_table.setItem(i, 0, QTableWidgetItem(p.id))
+            self.browse_table.setItem(i, 1, QTableWidgetItem(p.title))
+            self.browse_table.setItem(i, 2, QTableWidgetItem(p.sensor_type))
+            self.browse_table.setItem(i, 3, QTableWidgetItem(f"{p.resolution_m}m" if p.resolution_m else "N/A"))
+            self.browse_table.setItem(i, 4, QTableWidgetItem(", ".join(p.providers[:2])))
+            self.browse_table.setItem(i, 5, QTableWidgetItem(", ".join(p.keywords[:3])))
+
+    def populate_providers(self):
+        """Populate providers table."""
+        self.provider_table.setRowCount(0)
+
+        if not WORKFLOWS_AVAILABLE or not EODAG_PROVIDERS:
+            return
+
+        config_mgr = get_config_manager()
+        self.provider_table.setRowCount(len(EODAG_PROVIDERS))
+
+        for i, (prov_id, prov) in enumerate(EODAG_PROVIDERS.items()):
+            is_configured = config_mgr.is_provider_configured(prov_id) if config_mgr else False
+            products_count = len([p for p in EODAG_PRODUCTS.values() if prov_id in p.providers])
+
+            self.provider_table.setItem(i, 0, QTableWidgetItem(prov_id))
+            self.provider_table.setItem(i, 1, QTableWidgetItem(prov.name))
+            self.provider_table.setItem(i, 2, QTableWidgetItem("Yes" if prov.free_access else "No"))
+
+            status_item = QTableWidgetItem("Yes" if is_configured else "No")
+            status_item.setBackground(QColor(200, 255, 200) if is_configured else QColor(255, 200, 200))
+            self.provider_table.setItem(i, 3, status_item)
+
+            self.provider_table.setItem(i, 4, QTableWidgetItem(str(products_count)))
 
     def filter_datasets(self):
-        """Filter datasets by category."""
-        category = self.category_combo.currentData()
-        self.populate_browse_table(category)
+        """Filter datasets by sensor type."""
+        sensor_type = self.sensor_combo.currentData()
+        self.populate_datasets(sensor_type)
 
-    def on_browse_selection(self):
-        """Show details for selected dataset."""
+    def on_dataset_selected(self):
+        """Show dataset details."""
         selected = self.browse_table.selectedItems()
-        if not selected:
+        if not selected or not WORKFLOWS_AVAILABLE:
             return
 
         row = selected[0].row()
         ds_id = self.browse_table.item(row, 0).text()
 
-        if ds_id in DATA_SOURCES:
-            ds = DATA_SOURCES[ds_id]
-            details = f"""<b>{ds.name}</b> ({ds.id})
-<br><br>
-<b>Description:</b> {ds.description}
-<br><br>
-<b>Category:</b> {ds.category.value} | <b>Resolution:</b> {ds.resolution_m}m | <b>Revisit:</b> {ds.revisit_days or 'N/A'} days
-<br><br>
-<b>Pros:</b> {', '.join(ds.pros)}
-<br><br>
-<b>Cons:</b> {', '.join(ds.cons)}
-<br><br>
-<b>Suitable Indices:</b> {', '.join(ds.suitable_indices)}
-"""
-            self.details_text.setHtml(details)
+        if ds_id in EODAG_PRODUCTS:
+            p = EODAG_PRODUCTS[ds_id]
+            details = f"""<h3>{p.title}</h3>
+<p><b>ID:</b> {p.id}</p>
+<p><b>Platform:</b> {p.platform} | <b>Instrument:</b> {p.instrument}</p>
+<p><b>Sensor Type:</b> {p.sensor_type} | <b>Resolution:</b> {p.resolution_m}m</p>
+<p><b>Description:</b> {p.description}</p>
+<p><b>Providers:</b> {', '.join(p.providers)}</p>
+<p><b>Keywords:</b> {', '.join(p.keywords)}</p>"""
+            self.dataset_details.setHtml(details)
             self.search_btn.setEnabled(True)
 
-    def on_workflow_selection(self):
-        """Show workflow details when selected."""
-        selected = self.workflows_table.selectedItems()
-        if not selected or not WORKFLOWS_AVAILABLE:
-            return
-
-        row = selected[0].row()
-        wf_name = self.workflows_table.item(row, 0).text()
-
-        # Find workflow by name
-        for wf_id, wf in ANALYSIS_WORKFLOWS.items():
-            if wf.name == wf_name:
-                details = f"""<h3>{wf.name}</h3>
-<p><b>Category:</b> {wf.category.value}</p>
-<p><b>Description:</b> {wf.description}</p>
-<p><b>Primary Dataset:</b> {wf.primary_dataset}</p>
-<p><b>Fallback Datasets:</b> {', '.join(wf.fallback_datasets)}</p>
-<p><b>Indices:</b> {', '.join(wf.indices)}</p>
-<p><b>Cloud Cover Max:</b> {wf.cloud_cover_max}%</p>
-<p><b>Temporal Requirement:</b> {wf.temporal_requirement}</p>
-<h4>Processing Steps:</h4>
-<ol>
-"""
-                for step in wf.steps:
-                    details += f"<li><b>{step.name}</b>: {step.description}</li>"
-                details += "</ol>"
-
-                # Add index formulas
-                details += "<h4>QGIS Raster Calculator Formulas:</h4>"
-                for idx in wf.indices:
-                    formula = get_qgis_formula(idx, "sentinel2")
-                    details += f"<p><b>{idx}:</b> <code>{formula}</code></p>"
-
-                self.workflow_details.setHtml(details)
-                self.run_workflow_btn.setEnabled(True)
-                break
-
-    def on_provider_selection(self):
+    def on_provider_selected(self):
         """Show provider setup instructions."""
         selected = self.provider_table.selectedItems()
         if not selected or not WORKFLOWS_AVAILABLE:
@@ -696,187 +597,154 @@ class RecommendationDialog(QDialog):
             setup = f"""<h3>{prov.name}</h3>
 <p><b>URL:</b> <a href="{prov.url}">{prov.url}</a></p>
 <p><b>Free Access:</b> {'Yes' if prov.free_access else 'No'}</p>
-<p><b>Currently Configured:</b> {'Yes' if config_mgr.is_provider_configured(prov_id) else 'No'}</p>
+<p><b>Configured:</b> {'Yes' if config_mgr and config_mgr.is_provider_configured(prov_id) else 'No'}</p>
 """
             if prov.registration_url:
-                setup += f"<p><b>Registration:</b> <a href='{prov.registration_url}'>{prov.registration_url}</a></p>"
+                setup += f"<p><b>Register at:</b> <a href='{prov.registration_url}'>{prov.registration_url}</a></p>"
 
-            setup += f"""
-<h4>Configuration:</h4>
-<pre>{config_mgr.generate_config_snippet(prov_id)}</pre>
-
-<h4>Available Products:</h4>
-<ul>
-"""
-            for prod_id, prod in list(EODAG_PRODUCTS.items())[:10]:
-                if prov_id in prod.providers:
-                    setup += f"<li>{prod.title} ({prod_id})</li>"
-            setup += "</ul>"
+            if config_mgr:
+                setup += f"<h4>Configuration (add to eodag.yml):</h4><pre>{config_mgr.generate_config_snippet(prov_id)}</pre>"
 
             self.setup_text.setHtml(setup)
 
-    def get_recommendations(self):
-        """Get AI recommendations."""
-        analysis_text = self.analysis_input.toPlainText().strip()
-        if not analysis_text:
-            QMessageBox.warning(self, "Warning", "Please describe your analysis.")
+    def quick_query(self, query):
+        """Handle quick query button click."""
+        self.message_input.setText(query)
+        self.send_message()
+
+    def send_message(self):
+        """Send message to AI."""
+        message = self.message_input.text().strip()
+        if not message:
             return
 
-        location = self.location_input.toPlainText().strip()
-        if self.use_map_extent.isChecked() and self.plugin:
-            bbox = self.plugin.get_canvas_extent()
-            location = f"bbox: {bbox}"
+        # Add user message to chat
+        self.add_message("user", message)
+        self.message_input.clear()
 
-        self.recommend_btn.setEnabled(False)
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)
+        # Store in history
+        self.conversation_history.append({"role": "user", "content": message})
 
-        self.worker = RecommendationWorker(analysis_text, location)
-        self.worker.finished.connect(self.on_recommendation_finished)
-        self.worker.error.connect(self.on_recommendation_error)
+        # Build prompt and send to AI
+        prompt = build_ai_prompt(message, self.conversation_history)
+
+        self.progress.setVisible(True)
+        self.progress.setRange(0, 0)
+        self.send_btn.setEnabled(False)
+        self.status_label.setText("AI is thinking...")
+
+        self.worker = AIWorker(prompt)
+        self.worker.response_ready.connect(self.on_ai_response)
+        self.worker.error_occurred.connect(self.on_ai_error)
         self.worker.start()
 
-    def on_recommendation_finished(self, result):
-        """Handle recommendation completion."""
-        self.current_recommendation = result
-        self.recommend_btn.setEnabled(True)
-        self.progress_bar.setVisible(False)
+    def on_ai_response(self, response):
+        """Handle AI response."""
+        self.progress.setVisible(False)
+        self.send_btn.setEnabled(True)
+        self.status_label.setText("")
 
-        # Update primary
-        primary = result.get("primary_recommendation", "S2_MSI_L2A")
-        self.primary_label.setText(f"Primary Dataset: {primary}")
+        # Add AI response to chat
+        self.add_message("assistant", response)
 
-        # Update workflow
-        wf_name = result.get("workflow_name", "-")
-        self.workflow_label.setText(f"Matched Workflow: {wf_name}")
+        # Store in history
+        self.conversation_history.append({"role": "assistant", "content": response})
 
-        # Update datasets table
-        details = result.get("dataset_details", [])
-        self.datasets_table.setRowCount(len(details))
+        # Extract and display recommendations
+        self.extract_recommendations(response)
 
-        for i, ds in enumerate(details):
-            self.datasets_table.setItem(i, 0, QTableWidgetItem(ds.get("name", ds.get("id", ""))))
-            self.datasets_table.setItem(i, 1, QTableWidgetItem(ds.get("category", "")))
-            self.datasets_table.setItem(i, 2, QTableWidgetItem(str(ds.get("resolution_m", "N/A"))))
-            self.datasets_table.setItem(i, 3, QTableWidgetItem(ds.get("provider", "")))
-            desc = ds.get("description", "")[:60] + "..." if len(ds.get("description", "")) > 60 else ds.get("description", "")
-            self.datasets_table.setItem(i, 4, QTableWidgetItem(desc))
+    def on_ai_error(self, error):
+        """Handle AI error."""
+        self.progress.setVisible(False)
+        self.send_btn.setEnabled(True)
+        self.status_label.setText(f"Error: {error}")
 
-        # Update indices table with formulas
-        indices_details = result.get("indices_details", [])
-        suggested = result.get("suggested_indices", [])
+        self.add_message("system", f"Sorry, I encountered an error: {error}\n\nPlease try again or rephrase your question.")
 
-        if WORKFLOWS_AVAILABLE and not indices_details:
-            indices_details = [
-                {
-                    "name": idx,
-                    "full_name": SPECTRAL_INDICES.get(idx, {}).full_name if idx in SPECTRAL_INDICES else idx,
-                    "formula": get_qgis_formula(idx, "sentinel2")
-                }
-                for idx in suggested if idx in SPECTRAL_INDICES
-            ]
+    def add_message(self, role, content):
+        """Add a message to the chat display."""
+        cursor = self.chat_display.textCursor()
+        cursor.movePosition(QTextCursor.End)
 
-        self.indices_table.setRowCount(len(indices_details) or len(suggested))
+        # Format based on role
+        if role == "user":
+            html = f"""<div style="background-color: #e3f2fd; padding: 10px; border-radius: 8px; margin: 5px 50px 5px 5px;">
+<b>You:</b><br>{content.replace(chr(10), '<br>')}
+</div>"""
+        elif role == "assistant":
+            # Convert markdown-style formatting
+            formatted = content.replace("\n", "<br>")
+            formatted = formatted.replace("**", "<b>").replace("</b><b>", "")
+            formatted = formatted.replace("`", "<code>").replace("</code><code>", "")
 
-        for i, idx in enumerate(indices_details or suggested):
-            if isinstance(idx, dict):
-                self.indices_table.setItem(i, 0, QTableWidgetItem(idx.get("name", "")))
-                self.indices_table.setItem(i, 1, QTableWidgetItem(idx.get("full_name", "")))
-                self.indices_table.setItem(i, 2, QTableWidgetItem(idx.get("formula", "")))
-            else:
-                self.indices_table.setItem(i, 0, QTableWidgetItem(idx))
-                if WORKFLOWS_AVAILABLE and idx in SPECTRAL_INDICES:
-                    si = SPECTRAL_INDICES[idx]
-                    self.indices_table.setItem(i, 1, QTableWidgetItem(si.full_name))
-                    self.indices_table.setItem(i, 2, QTableWidgetItem(get_qgis_formula(idx, "sentinel2")))
+            html = f"""<div style="background-color: #f5f5f5; padding: 10px; border-radius: 8px; margin: 5px 5px 5px 50px;">
+<b>AI Assistant:</b><br>{formatted}
+</div>"""
+        else:  # system
+            html = f"""<div style="background-color: #ffebee; padding: 10px; border-radius: 8px; margin: 5px;">
+<b>System:</b><br>{content.replace(chr(10), '<br>')}
+</div>"""
 
-        # Update workflow steps
-        self.workflow_list.clear()
-        for step in result.get("processing_workflow", []):
-            self.workflow_list.addItem(step)
+        self.chat_display.append(html)
 
-        # Update provider status
-        provider_status = result.get("provider_status", {})
-        if provider_status.get("status") == "available":
-            self.provider_status_label.setText(
-                f"Ready to use with: {provider_status.get('recommended_provider', 'Unknown')}"
-            )
-            self.provider_status_label.setStyleSheet("color: green;")
-        elif provider_status.get("status") == "setup_required":
-            setup_providers = provider_status.get("setup_required", [])
-            names = [p.get("name", p.get("provider", "")) for p in setup_providers[:2]]
-            self.provider_status_label.setText(
-                f"Setup required. Configure one of: {', '.join(names)}"
-            )
-            self.provider_status_label.setStyleSheet("color: orange;")
+        # Scroll to bottom
+        scrollbar = self.chat_display.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def extract_recommendations(self, response):
+        """Extract dataset recommendations from AI response."""
+        response_lower = response.lower()
+
+        found_datasets = []
+        if WORKFLOWS_AVAILABLE and EODAG_PRODUCTS:
+            for ds_id, ds in EODAG_PRODUCTS.items():
+                if ds_id.lower() in response_lower or ds.title.lower() in response_lower:
+                    found_datasets.append(ds)
+
+        if found_datasets:
+            self.rec_panel.setVisible(True)
+            self.rec_table.setRowCount(len(found_datasets))
+
+            for i, ds in enumerate(found_datasets[:5]):
+                self.rec_table.setItem(i, 0, QTableWidgetItem(ds.id))
+                self.rec_table.setItem(i, 1, QTableWidgetItem(f"{ds.resolution_m}m" if ds.resolution_m else "N/A"))
+                self.rec_table.setItem(i, 2, QTableWidgetItem(ds.sensor_type))
+                self.rec_table.setItem(i, 3, QTableWidgetItem(", ".join(ds.keywords[:3])))
+
+            self.current_recommendations = {ds.id: ds for ds in found_datasets}
+            self.search_btn.setEnabled(True)
         else:
-            self.provider_status_label.setText("-")
-            self.provider_status_label.setStyleSheet("")
+            self.rec_panel.setVisible(False)
 
-        # Update tips
-        self.cloud_label.setText(result.get("cloud_cover_advice", "-"))
-        self.temporal_label.setText(result.get("temporal_advice", "-"))
+    def clear_chat(self):
+        """Clear the chat history."""
+        self.conversation_history = []
+        self.chat_display.clear()
+        self.rec_panel.setVisible(False)
+        self.search_btn.setEnabled(False)
 
-        self.search_btn.setEnabled(True)
-        self.run_workflow_btn.setEnabled(bool(result.get("qgis_steps")))
-
-    def on_recommendation_error(self, error_message):
-        """Handle recommendation error."""
-        self.recommend_btn.setEnabled(True)
-        self.progress_bar.setVisible(False)
-        QMessageBox.critical(self, "Error", f"Failed to get recommendations: {error_message}")
+        # Re-add welcome message
+        welcome = """<div style="padding: 10px; background-color: #e8f4f8; border-radius: 8px; margin: 5px;">
+<b>Chat cleared!</b> How can I help you with your remote sensing analysis?
+</div>"""
+        self.chat_display.setHtml(welcome)
 
     def search_recommended(self):
         """Open search dialog with recommended dataset."""
-        selected_id = None
-
-        if self.current_recommendation:
-            selected_id = self.current_recommendation.get("primary_recommendation")
-
-        browse_selected = self.browse_table.selectedItems()
-        if browse_selected:
-            selected_id = self.browse_table.item(browse_selected[0].row(), 0).text()
-
-        if not selected_id or not self.plugin:
+        selected = self.rec_table.selectedItems()
+        if selected:
+            ds_id = self.rec_table.item(selected[0].row(), 0).text()
+        elif self.current_recommendations:
+            ds_id = list(self.current_recommendations.keys())[0]
+        else:
             return
 
-        from .geodatahub_dialog import GeoDataHubDialog
-
-        dlg = GeoDataHubDialog(parent=self.parent(), plugin=self.plugin)
-        location = self.location_input.toPlainText().strip()
-        query = f"{selected_id} {location}" if location else selected_id
-        dlg.search_input.setText(query)
-        dlg.show()
-        dlg.exec_()
-
-    def run_workflow(self):
-        """Show QGIS workflow execution guide."""
-        if not self.current_recommendation:
-            return
-
-        qgis_steps = self.current_recommendation.get("qgis_steps", [])
-        indices = self.current_recommendation.get("suggested_indices", [])
-
-        guide = "<h3>QGIS Workflow Guide</h3>"
-        guide += "<p>Follow these steps in QGIS:</p><ol>"
-
-        for step in qgis_steps:
-            if isinstance(step, dict):
-                guide += f"<li><b>{step.get('name', '')}</b>: {step.get('description', '')}"
-                if step.get('qgis_algorithm'):
-                    guide += f"<br><i>Algorithm: {step.get('qgis_algorithm')}</i>"
-                guide += "</li>"
-            else:
-                guide += f"<li>{step}</li>"
-
-        guide += "</ol>"
-
-        # Add formulas
-        if WORKFLOWS_AVAILABLE:
-            guide += "<h4>Copy-paste formulas for Raster Calculator:</h4>"
-            for idx in indices:
-                if idx in SPECTRAL_INDICES:
-                    formula = get_qgis_formula(idx, "sentinel2")
-                    guide += f"<p><b>{idx}:</b><br><code>{formula}</code></p>"
-
-        QMessageBox.information(self, "QGIS Workflow Guide", guide)
+        if self.plugin:
+            try:
+                from .geodatahub_dialog import GeoDataHubDialog
+                dlg = GeoDataHubDialog(parent=self.parent(), plugin=self.plugin)
+                dlg.search_input.setText(ds_id)
+                dlg.show()
+                dlg.exec_()
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Could not open search dialog: {e}")
